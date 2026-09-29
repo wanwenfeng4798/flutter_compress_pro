@@ -1,6 +1,6 @@
 name: flutter_compress_pro
 description: "Video & image compression for Android, iOS, Web, macOS, Windows & Linux. Mobile/Web/macOS use OS encoders (no FFmpeg); Windows/Linux auto-download FFmpeg when missing."
-version: 0.1.0
+version: 0.2.0
 homepage: https://github.com/wanwenfeng4798/flutter_compress_pro
 repository: https://github.com/wanwenfeng4798/flutter_compress_pro
 
@@ -15,7 +15,7 @@ dependencies:
   # Web backend (WebCodecs + mp4box/mp4-muxer via JS interop).
   flutter_web_plugins:
     sdk: flutter
-  web: ^1.1.0
+  web: ^1.1.1
 
 dev_dependencies:
   flutter_test:

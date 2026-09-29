@@ -63,7 +63,7 @@ kotlin {
 // duration inside the 1.x line, which silently truncated every output to 30s.
 // That class of change compiles clean and passes unit tests, so builds must stay
 // reproducible and upgrades must be deliberate (CLAUDE.md §12.3).
-private val media3 = "1.10.1"
+private val media3 = "1.11.1"
 
 dependencies {
     // Google's official, hardware-accelerated transcoding pipeline. Media3
@@ -74,11 +74,11 @@ dependencies {
     // Provides androidx.media3.muxer.* referenced by DefaultMuxer / InAppMp4Muxer.
     implementation("androidx.media3:media3-muxer:$media3")
 
-    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
-    testImplementation("org.mockito:mockito-core:5.14.2")
-    // testOptions uses useJUnitPlatform(), which needs a JUnit 5 engine present.
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.11.4")
+    testImplementation("org.mockito:mockito-core:5.24.0")
+    // testOptions uses useJUnitPlatform(), which needs a JUnit engine present.
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:6.1.3")
 }

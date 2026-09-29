@@ -129,7 +129,7 @@ JPEG is reliable; other formats depend on the muxer.
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.1.0
+  flutter_compress_pro: ^0.2.0
 ```
 
 ## Integrate with an AI assistant
@@ -429,8 +429,8 @@ removes it from the component listing too:
 
 | Dependency | Version | Unshrunk size | Notes |
 |---|---|---|---|
-| `androidx.media3:media3-transformer` + `-effect`, `-common`, `-muxer` | 1.10.1 | ~AARs including transitive ExoPlayer modules | The video pipeline. R8 removes a large share of this; measure your own release build |
-| `androidx.core:core-ktx` | 1.19.0 | ~0.2 MB | Almost always already present — Flutter pulls `androidx.core` in |
+| `androidx.media3:media3-transformer` + `-effect`, `-common`, `-muxer` | 1.11.1 | ~AARs including transitive ExoPlayer modules | The video pipeline. R8 removes a large share of this; measure your own release build |
+| `androidx.core:core-ktx` | 1.19.1 | ~0.2 MB | Almost always already present — Flutter pulls `androidx.core` in |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-android` | 1.11.0 | ~20 KB | Also usually already present |
 
 iOS, macOS and web add **no** third-party native dependencies: Apple platforms use

@@ -22,10 +22,10 @@ dependencies:
   # Localization (gen_l10n) for the demo's 12 languages.
   flutter_localizations:
     sdk: flutter
-  intl: ^0.20.2
+  intl: ^0.20.3
 
   # Persist the user's chosen language across launches.
-  shared_preferences: ^2.3.0
+  shared_preferences: ^2.5.5
 
   flutter_compress_pro:
     # When depending on this package from a real application you should use:
@@ -37,16 +37,16 @@ dependencies:
 
 
   # Native file / directory pickers for the demo.
-  file_picker: ^12.2.0
+  file_picker: ^13.1.0
 
-  material_ui: ^1.1.1
+  material_ui: ^1.4.0
 
 dev_dependencies:
   integration_test:
     sdk: flutter
   # Used by integration_test to materialise fixtures onto a real filesystem path,
   # which is what the native engines take.
-  path_provider: ^2.1.0
+  path_provider: ^2.1.6
   flutter_test:
     sdk: flutter
 

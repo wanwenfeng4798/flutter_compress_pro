@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Bump Android / example dependencies (Media3 1.11.1, AGP 9.4.1, Kotlin 2.4.20, Gradle 9.8.0, and latest pub packages).
+
 ## 0.1.0
 
 Initial release of **flutter_compress_pro**.

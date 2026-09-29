@@ -115,7 +115,7 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.1.0
+  flutter_compress_pro: ^0.2.0
 ```
 
 ## 配合 AI 助手接入
@@ -399,8 +399,8 @@ iOS 完全不需要这一套:插件用 `beginBackgroundTask` 申请一小段后�
 
 | 依赖 | 版本 | 未压缩体积 | 说明 |
 |---|---|---|---|
-| `androidx.media3:media3-transformer` 及 `-effect`、`-common`、`-muxer` | 1.10.1 | 含传递依赖(ExoPlayer 等) AAR | 视频管线。R8 会裁掉相当大一部分,请以自己的 release 包实测为准 |
-| `androidx.core:core-ktx` | 1.19.0 | 约 0.2 MB | 几乎必然已存在 —— Flutter 本身就会引入 `androidx.core` |
+| `androidx.media3:media3-transformer` 及 `-effect`、`-common`、`-muxer` | 1.11.1 | 含传递依赖(ExoPlayer 等) AAR | 视频管线。R8 会裁掉相当大一部分,请以自己的 release 包实测为准 |
+| `androidx.core:core-ktx` | 1.19.1 | 约 0.2 MB | 几乎必然已存在 —— Flutter 本身就会引入 `androidx.core` |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-android` | 1.11.0 | 约 20 KB | 通常也已存在 |
 
 iOS / macOS / Web **没有**第三方原生依赖。Windows / Linux：优先系统 FFmpeg；若无，
