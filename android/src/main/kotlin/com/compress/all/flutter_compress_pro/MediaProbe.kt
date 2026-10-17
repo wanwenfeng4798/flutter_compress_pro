@@ -1,5 +1,7 @@
 package com.compress.all.flutter_compress_pro
 
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import java.io.File
 
@@ -20,12 +22,24 @@ object MediaProbe {
                 "frameRate" to r.extractMetadata(
                     MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE,
                 )?.toDoubleOrNull(),
-                "codec" to null,
+                "codec" to codec(path),
+                "hasAudio" to (r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"),
                 "rotation" to r.int(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION),
             )
         } finally {
             r.release()
         }
+    }
+
+    private fun codec(path: String): String? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            (0 until extractor.trackCount).mapNotNull { extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME) }
+                .firstOrNull { it.startsWith("video/") }?.let {
+                    if (it.contains("hevc")) "h265" else if (it.contains("avc")) "h264" else it
+                }
+        } finally { extractor.release() }
     }
 
     private fun MediaMetadataRetriever.int(key: Int) = extractMetadata(key)?.toIntOrNull() ?: 0

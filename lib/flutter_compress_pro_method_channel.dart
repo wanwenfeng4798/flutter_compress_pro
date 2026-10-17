@@ -12,7 +12,9 @@ import 'src/models.dart';
 /// single source of truth. (If this plugin grows, these hand-written maps are
 /// the natural point to migrate to Pigeon for compile-time-checked messages.)
 class MethodChannelFlutterCompress extends FlutterCompressPlatform {
-  final MethodChannel _method = const MethodChannel('flutter_compress_pro/methods');
+  final MethodChannel _method = const MethodChannel(
+    'flutter_compress_pro/methods',
+  );
   final EventChannel _progress = const EventChannel(
     'flutter_compress_pro/progress',
   );
@@ -49,7 +51,7 @@ class MethodChannelFlutterCompress extends FlutterCompressPlatform {
       return res;
     } on PlatformException catch (e, stackTrace) {
       // Preserve the original stack — without this, a failure's origin in the
-      // native/JS layer is lost (CLAUDE.md §3.4).
+      // native/JS layer is lost.
       Error.throwWithStackTrace(
         e.code == CompressErrorCode.cancelled
             ? onCancelled(e.message)

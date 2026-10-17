@@ -27,7 +27,7 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
 
   Process? _activeProcess;
   String? _activeId;
-  String? _preCancelledId;
+  final Set<String> _cancelled = {};
 
   @override
   Stream<CompressionProgress> get progressStream => _progressController.stream;
@@ -50,7 +50,7 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
   ) async {
     try {
       final info = await FfmpegVideo.probe(path);
-      final durationMs = _clampDuration(info.durationMs, config);
+      final durationMs = SizeMath.durationMs(info.durationMs, config);
       final dims = SizeMath.targetDimensions(info.width, info.height, config);
       final videoBps = SizeMath.videoBitrateBps(
         config: config,
@@ -83,15 +83,23 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
     String? outputDir,
     String? outputName,
   ) async {
-    if (_preCancelledId == id) {
-      _preCancelledId = null;
+    config.validate();
+    if (_activeId != null) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Video engine is busy',
+      );
+    }
+    _activeId = id;
+    File? output;
+    if (_cancelled.remove(id)) {
+      _activeId = null;
       throw VideoCompressCancelledException();
     }
     try {
-      await FfmpegBinaries.ensureAvailable();
       final info = await FfmpegVideo.probe(path);
       final originalSize = await File(path).length();
-      final durationMs = _clampDuration(info.durationMs, config);
+      final durationMs = SizeMath.durationMs(info.durationMs, config);
       final dims = SizeMath.targetDimensions(info.width, info.height, config);
       final videoBps = SizeMath.videoBitrateBps(
         config: config,
@@ -106,8 +114,8 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
         ext: 'mp4',
       );
 
+      output = outFile;
       final result = await FfmpegVideo.compress(
-        id: id,
         inputPath: path,
         outputPath: outFile.path,
         config: config,
@@ -127,11 +135,10 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
           _activeProcess = proc;
           _activeId = id;
         },
-        isCancelled: () => _preCancelledId == id,
+        isCancelled: () => _cancelled.contains(id),
       );
 
       _activeProcess = null;
-      _activeId = null;
 
       if (result.cancelled) {
         throw VideoCompressCancelledException();
@@ -139,13 +146,12 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
 
       final usedCodec = result.usedCodec;
       final compressedSize = await File(outFile.path).length();
-      final minSave = config.minSavingsPercent;
-      final savedPct = originalSize == 0
-          ? 0.0
-          : (1 - compressedSize / originalSize) * 100;
-      final shouldSkip =
-          config.keepOriginalIfLarger &&
-          (compressedSize >= originalSize || savedPct < minSave);
+      final shouldSkip = SizeMath.keepsOriginal(
+        compressedSize,
+        originalSize,
+        config.keepOriginalIfLarger,
+        config.minSavingsPercent,
+      );
       if (shouldSkip) {
         try {
           await File(outFile.path).delete();
@@ -161,38 +167,43 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
           codec: info.codec ?? usedCodec,
           skipped: true,
           frameRate: info.frameRate,
-          hasAudio: !config.removeAudio,
+          hasAudio: info.hasAudio,
         );
       }
 
+      final actual = await FfmpegVideo.probe(outFile.path);
+      if (_cancelled.contains(id)) throw VideoCompressCancelledException();
       return VideoCompressResult(
         id: id,
         outputPath: outFile.path,
         originalSizeBytes: originalSize,
         compressedSizeBytes: compressedSize,
-        width: dims.$1,
-        height: dims.$2,
-        durationMs: durationMs,
-        codec: usedCodec,
+        width: actual.width,
+        height: actual.height,
+        durationMs: actual.durationMs,
+        codec: actual.codec ?? usedCodec,
         skipped: false,
-        frameRate: config.frameRate ?? info.frameRate,
-        hasAudio: !config.removeAudio,
+        frameRate: actual.frameRate,
+        hasAudio: actual.hasAudio,
       );
     } on CompressException {
+      if (output != null && await output.exists()) await output.delete();
       rethrow;
     } catch (e) {
+      if (output != null && await output.exists()) await output.delete();
       throw VideoCompressException(CompressErrorCode.compressFailed, '$e');
     } finally {
       _activeProcess = null;
       if (_activeId == id) _activeId = null;
+      _cancelled.remove(id);
+      if (output != null) PluginCache.release(output);
     }
   }
 
   @override
   Future<void> cancel(String? id) async {
-    if (id != null && (_activeId == null || _activeId != id)) {
-      _preCancelledId = id;
-    }
+    final target = id ?? _activeId;
+    if (target != null && target == _activeId) _cancelled.add(target);
     final proc = _activeProcess;
     if (proc != null && (id == null || id == _activeId)) {
       proc.kill(ProcessSignal.sigkill);
@@ -200,7 +211,7 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
   }
 
   @override
-  Future<bool> isCompressing() async => _activeProcess != null;
+  Future<bool> isCompressing() async => _activeId != null;
 
   @override
   Future<String> getThumbnail(
@@ -226,6 +237,12 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
 
   @override
   Future<void> clearCache() async {
+    if (_activeId != null) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Video engine is busy',
+      );
+    }
     await PluginCache.clear();
   }
 
@@ -240,11 +257,7 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
       if (!await downloads.exists()) {
         await downloads.create(recursive: true);
       }
-      final name = fileName ?? path.split(RegExp(r'[/\\]')).last;
-      final dest = File('${downloads.path}${Platform.pathSeparator}$name');
-      if (await dest.exists()) await dest.delete();
-      await File(path).copy(dest.path);
-      return dest.path;
+      return await PluginCache.saveCopy(path, downloads, fileName);
     } catch (e) {
       throw VideoCompressException(CompressErrorCode.saveFailed, '$e');
     }
@@ -296,11 +309,13 @@ class FlutterCompressDesktop extends FlutterCompressPlatform {
     }
   }
 
-  int _clampDuration(int fullMs, VideoCompressConfig config) {
-    final trim = config.trim;
-    if (trim == null) return fullMs;
-    final end = trim.endMs < fullMs ? trim.endMs : fullMs;
-    final start = trim.startMs.clamp(0, end);
-    return (end - start).clamp(1, fullMs);
+  @override
+  Future<bool> isSupported() async {
+    try {
+      await FfmpegBinaries.ensureAvailable(allowDownload: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 }

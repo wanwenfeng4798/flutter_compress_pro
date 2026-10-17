@@ -49,6 +49,7 @@ class ImageEngine(private val context: Context) {
         outputDir: String?,
         outputName: String?,
     ): Map<String, Any?> {
+        config.validate()
         val originalSize = File(path).length()
         val out = encode(Src.OfFile(path), originalSize, config)
         if (out.keptOriginal) {
@@ -63,19 +64,38 @@ class ImageEngine(private val context: Context) {
             )
         }
         val file = context.resolveOutput(outputDir, outputName, path, ext(out.format))
-        file.writeBytes(out.bytes)
-        // EXIF is appended after the size search, so it can add a few hundred
-        // bytes on top of targetSizeKB; the size reported below is the real one.
-        if (config.keepExif && out.format == "jpeg") copyExif(path, file.absolutePath)
-        return mapOf(
-            "outputPath" to file.absolutePath,
-            "originalSizeBytes" to originalSize,
-            "compressedSizeBytes" to file.length(),
-            "width" to out.width,
-            "height" to out.height,
-            "format" to out.format,
-            "skipped" to false,
-        )
+        try {
+            file.writeBytes(out.bytes)
+            // EXIF is appended after the size search, so it can add a few hundred
+            // bytes on top of targetSizeKB; the size reported below is the real one.
+            if (config.keepExif && out.format == "jpeg") copyExif(path, file.absolutePath)
+            if (!config.lossless && config.targetSizeKB?.let { file.length() > it.toLong() * 1024 } == true) {
+                error("Target size including EXIF cannot be met")
+            }
+            if (SizeMath.keepsOriginal(
+                    file.length(), originalSize, config.keepOriginalIfLarger, config.minSavingsPercent,
+                )
+            ) {
+                file.delete()
+                return mapOf(
+                    "outputPath" to path, "originalSizeBytes" to originalSize,
+                    "compressedSizeBytes" to originalSize, "width" to out.src.width,
+                    "height" to out.src.height, "format" to out.src.format, "skipped" to true,
+                )
+            }
+            return mapOf(
+                "outputPath" to file.absolutePath,
+                "originalSizeBytes" to originalSize,
+                "compressedSizeBytes" to file.length(),
+                "width" to out.width,
+                "height" to out.height,
+                "format" to out.format,
+                "skipped" to false,
+            )
+        } catch (error: Throwable) {
+            file.delete()
+            throw error
+        } finally { releaseOutput(file) }
     }
 
     /**
@@ -85,6 +105,7 @@ class ImageEngine(private val context: Context) {
      * borrows a temp file and deletes it again.
      */
     fun compressBytes(source: ByteArray, config: ImageConfig): Map<String, Any?> {
+        config.validate()
         val out = encode(Src.OfBytes(source), source.size.toLong(), config)
         if (out.keptOriginal) {
             return mapOf(
@@ -99,6 +120,18 @@ class ImageEngine(private val context: Context) {
         var bytes = out.bytes
         if (config.keepExif && out.format == "jpeg") {
             bytes = withExifFromBytes(source, bytes)
+        }
+        if (!config.lossless && config.targetSizeKB?.let { bytes.size > it.toLong() * 1024 } == true) {
+            error("Target size including EXIF cannot be met")
+        }
+        if (SizeMath.keepsOriginal(
+                bytes.size.toLong(), source.size.toLong(), config.keepOriginalIfLarger, config.minSavingsPercent,
+            )
+        ) {
+            return mapOf(
+                "bytes" to source, "originalSizeBytes" to source.size.toLong(),
+                "width" to out.src.width, "height" to out.src.height, "format" to out.src.format, "skipped" to true,
+            )
         }
         return mapOf(
             "bytes" to bytes,
@@ -154,13 +187,14 @@ class ImageEngine(private val context: Context) {
             } else {
                 var fit = fitToTarget(bmp, effective, lossy, targetBytes, MIN_QUALITY)
                 var tries = 0
-                while (fit.bytes.size > targetBytes && tries < MAX_DOWNSCALES && bmp.width > MIN_SIDE) {
-                    bmp = bmp.scaledTo(bmp.width * 3 / 4, bmp.height * 3 / 4)
+                while (fit.bytes.size > targetBytes && tries < MAX_DOWNSCALES && (bmp.width > 1 || bmp.height > 1)) {
+                    bmp = bmp.scaledTo((bmp.width * 3 / 4).coerceAtLeast(1), (bmp.height * 3 / 4).coerceAtLeast(1))
                     // A smaller image fits at least the quality the last round
                     // reached, so the search can start from there.
                     fit = fitToTarget(bmp, effective, lossy, targetBytes, fit.quality)
                     tries++
                 }
+                if (fit.bytes.size > targetBytes) error("Target image size cannot be met")
                 bytes = fit.bytes
             }
 
@@ -358,18 +392,20 @@ class ImageEngine(private val context: Context) {
 
     private fun encode(bmp: Bitmap, format: String, quality: Int, lossless: Boolean): ByteArray {
         val bos = ByteArrayOutputStream()
-        bmp.compress(compressFormat(format, lossless), quality, bos)
+        check(bmp.compress(compressFormat(format, lossless), quality, bos) && bos.size() > 0) { "Image encoder failed" }
         return bos.toByteArray()
     }
 
     @Suppress("DEPRECATION")
     private fun compressFormat(format: String, lossless: Boolean): Bitmap.CompressFormat = when (format) {
         "png" -> Bitmap.CompressFormat.PNG
+
         "webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (lossless) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.WEBP_LOSSY
         } else {
             Bitmap.CompressFormat.WEBP
         }
+
         else -> Bitmap.CompressFormat.JPEG
     }
 
@@ -405,8 +441,7 @@ class ImageEngine(private val context: Context) {
         const val TAG = "FlutterCompress"
         const val MIN_QUALITY = 1
         const val MAX_QUALITY = 100
-        const val MAX_DOWNSCALES = 5
-        const val MIN_SIDE = 32
+        const val MAX_DOWNSCALES = 24
 
         /**
          * Tags copied when `keepExif` is set.

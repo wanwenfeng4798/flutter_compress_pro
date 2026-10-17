@@ -2,13 +2,20 @@ package com.compress.all.flutter_compress_pro
 
 import android.content.Context
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+private val activeOutputs = ConcurrentHashMap.newKeySet<String>()
+internal fun releaseOutput(file: File) { file.parentFile?.let { activeOutputs.remove(it.absolutePath) } }
 
 /** The plugin's private scratch directory for intermediate outputs/thumbnails. */
 internal fun Context.compressCacheDir(): File =
     File(cacheDir, "flutter_compress_pro").apply { mkdirs() }
 
 internal fun Context.clearCompressCache() {
-    compressCacheDir().listFiles()?.forEach { it.delete() }
+    compressCacheDir().listFiles()?.filterNot {
+        activeOutputs.contains(it.absolutePath)
+    }?.forEach { it.deleteRecursively() }
 }
 
 /**
@@ -38,10 +45,8 @@ internal fun Context.resolveOutput(
     } else {
         File(compressCacheDir(), fileName)
     }
-    // Never write over the input: the engines still read the source afterwards
-    // (EXIF copy, size comparison), and clobbering it in place loses the original.
-    if (target.absolutePath == File(sourcePath).absolutePath) {
-        return File(target.parentFile, "$base-1.$ext")
-    }
-    return target
+    val jobDir = File(target.parentFile, "compress-${UUID.randomUUID()}")
+    check(jobDir.mkdir()) { "Cannot reserve output directory" }
+    activeOutputs.add(jobDir.absolutePath)
+    return File(jobDir, target.name)
 }

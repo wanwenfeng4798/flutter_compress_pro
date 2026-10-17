@@ -37,8 +37,8 @@ abstract class FlutterCompressPlatform extends PlatformInterface {
   ) => throw UnimplementedError('estimate() has not been implemented.');
 
   /// Compress [path] using [config]. [id] identifies the job (for progress
-  /// correlation and cancellation). When [outputPath] is non-null the encoded
-  /// file is written there; otherwise it lands in the plugin cache.
+  /// correlation and cancellation). When [outputDir] is non-null the encoded
+  /// file is written inside that directory; otherwise it lands in the plugin cache.
   Future<VideoCompressResult> compress(
     String id,
     String path,

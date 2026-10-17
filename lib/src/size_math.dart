@@ -3,11 +3,13 @@
 //
 // This is the Dart half of a three-way port — `SizeMath.kt` and `SizeMath.swift`
 // implement the same algorithm line for line. **Any change here MUST be mirrored
-// in both** (CLAUDE.md §12.2). It deliberately depends on nothing but the models
+// in both**. It deliberately depends on nothing but the models
 // so it stays unit-testable on the VM: the web platform implementation imports
 // `dart:js_interop` and cannot be loaded by `flutter test`.
 
 import 'models.dart';
+import 'error_codes.dart';
+import 'exceptions.dart';
 
 /// Shared size/bitrate math. Pure functions, no platform dependencies.
 abstract final class SizeMath {
@@ -93,8 +95,34 @@ abstract final class SizeMath {
       w *= s;
       h *= s;
     }
-    final m = config.alignment == DimensionAlignment.auto16 ? 16 : 2;
+    if (config.alignment == DimensionAlignment.none) {
+      return (w.toInt().clamp(1, srcW), h.toInt().clamp(1, srcH));
+    }
+    const m = 16;
     return (_align(w.toInt(), m), _align(h.toInt(), m));
+  }
+
+  static bool keepsOriginal(
+    int compressed,
+    int original,
+    bool enabled,
+    int percent,
+  ) =>
+      enabled &&
+      original > 0 &&
+      compressed >= original - original * percent ~/ 100;
+
+  static int durationMs(int full, VideoCompressConfig config) {
+    config.validate();
+    final trim = config.trim;
+    if (trim == null) return full;
+    if (full <= 0 || trim.startMs >= full) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Trim starts beyond the media duration',
+      );
+    }
+    return trim.endMs.clamp(0, full) - trim.startMs;
   }
 
   static int _presetPercent(CompressQuality q) => switch (q) {
@@ -111,6 +139,6 @@ abstract final class SizeMath {
   /// Always rounds *down*, so alignment can never upscale.
   static int _align(int v, int m) {
     final r = (v ~/ m) * m;
-    return r < m ? m : r;
+    return r == 0 ? v.clamp(1, m) : r;
   }
 }

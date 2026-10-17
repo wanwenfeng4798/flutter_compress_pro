@@ -31,3 +31,7 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 /build/
 /coverage/
+
+# Generated native build reports and local regression binaries.
+/example/android/build/
+/tool/.build/

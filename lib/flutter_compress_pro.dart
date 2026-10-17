@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'flutter_compress_pro_platform_interface.dart';
 import 'src/exceptions.dart';
+import 'src/error_codes.dart';
 import 'src/image_models.dart';
 import 'src/models.dart';
 
@@ -41,8 +42,10 @@ class CancellationToken {
 
   /// Make this token usable again for a new job.
   void reset() {
+    if (_ids.isNotEmpty) {
+      throw StateError('Cannot reset a token with pending jobs');
+    }
     _cancelled = false;
-    _ids.clear();
   }
 
   Future<void> cancel() async {
@@ -70,6 +73,28 @@ class FlutterCompress {
   FlutterCompressPlatform get _platform => FlutterCompressPlatform.instance;
 
   int _counter = 0;
+  int _operations = 0;
+  bool _clearing = false;
+  Future<void> _videoQueue = Future.value();
+  final Set<String> _pending = {};
+  final Set<String> _cancelledJobs = {};
+  String? _running;
+
+  Future<T> _track<T>(Future<T> Function() action) async {
+    if (_clearing) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Cache cleanup is in progress',
+      );
+    }
+    _operations++;
+    try {
+      return await action();
+    } finally {
+      _operations--;
+    }
+  }
+
   String _newId() =>
       'job_${DateTime.now().microsecondsSinceEpoch}_${_counter++}';
 
@@ -78,15 +103,19 @@ class FlutterCompress {
   Stream<CompressionProgress> get progressStream => _platform.progressStream;
 
   /// Probe a source video's metadata.
-  Future<VideoInfo> getVideoInfo(String path) => _platform.getVideoInfo(path);
+  Future<VideoInfo> getVideoInfo(String path) =>
+      _track(() => _platform.getVideoInfo(path));
 
   /// Estimate the output size/bitrate for [config] without encoding.
   Future<CompressionEstimate> estimate(
     String path,
     VideoCompressConfig config,
-  ) => _platform.estimate(path, config);
+  ) => _track(() {
+    config.validate();
+    return _platform.estimate(path, config);
+  });
 
-  /// Compress a single video.
+  /// Compress a single video. Concurrent calls are queued in arrival order.
   ///
   /// [onProgress] receives events for this job only. Provide a
   /// [cancellationToken] to abort mid-flight.
@@ -111,29 +140,75 @@ class FlutterCompress {
     String? outputDirectory,
     String? outputName,
   }) async {
+    config.validate();
+    if (_clearing) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Cache cleanup is in progress',
+      );
+    }
     final id = _newId();
-    cancellationToken?._bind(id);
-
     if (cancellationToken?.isCancelled ?? false) {
       throw VideoCompressCancelledException();
     }
-
-    StreamSubscription<CompressionProgress>? sub;
-    if (onProgress != null) {
-      sub = progressStream.where((p) => p.id == id).listen(onProgress);
-    }
-    try {
-      return await _platform.compress(
-        id,
-        path,
-        config,
-        outputDirectory,
-        outputName,
-      );
-    } finally {
-      await sub?.cancel();
-      cancellationToken?._unbind(id);
-    }
+    cancellationToken?._bind(id);
+    _pending.add(id);
+    final previous = _videoQueue;
+    final slot = Completer<void>();
+    _videoQueue = slot.future;
+    return _track(() async {
+      StreamSubscription<CompressionProgress>? sub;
+      var lastProgress = 0.0;
+      try {
+        await previous;
+        if (_cancelledJobs.contains(id) ||
+            (cancellationToken?.isCancelled ?? false)) {
+          throw VideoCompressCancelledException();
+        }
+        _running = id;
+        if (onProgress != null) {
+          sub = progressStream.where((p) => p.id == id).listen((p) {
+            final fraction = p.progress.clamp(lastProgress, 1.0);
+            lastProgress = fraction;
+            onProgress(
+              CompressionProgress(
+                id: id,
+                progress: fraction,
+                currentOutputBytes: p.currentOutputBytes,
+                estimatedRemainingMs: p.estimatedRemainingMs,
+              ),
+            );
+          });
+        }
+        final result = await _platform.compress(
+          id,
+          path,
+          config,
+          outputDirectory,
+          outputName,
+        );
+        if (_cancelledJobs.contains(id)) {
+          throw VideoCompressCancelledException();
+        }
+        if (lastProgress < 1) {
+          onProgress?.call(
+            CompressionProgress(
+              id: id,
+              progress: 1,
+              currentOutputBytes: result.compressedSizeBytes,
+            ),
+          );
+        }
+        return result;
+      } finally {
+        await sub?.cancel();
+        cancellationToken?._unbind(id);
+        _pending.remove(id);
+        _cancelledJobs.remove(id);
+        if (_running == id) _running = null;
+        slot.complete();
+      }
+    });
   }
 
   /// Compress a list of videos sequentially, reporting per-item results.
@@ -185,12 +260,24 @@ class FlutterCompress {
   /// Prefer a [CancellationToken] (it tracks its own job ids) or the explicit
   /// [cancelAll]; the bare `cancel()` form is easy to write by accident when you
   /// meant to stop a single job.
-  Future<void> cancel([String? id]) => _platform.cancel(id);
+  Future<void> cancel([String? id]) async {
+    if (id == null) {
+      _cancelledJobs.addAll(_pending);
+    } else if (_pending.contains(id)) {
+      _cancelledJobs.add(id);
+    }
+    if (_running != null && (id == null || id == _running)) {
+      await _platform.cancel(_running);
+    } else if (id == null || !_pending.contains(id)) {
+      await _platform.cancel(id);
+    }
+  }
 
   /// Cancel every in-flight job. Same as `cancel()` with no id, but says so.
-  Future<void> cancelAll() => _platform.cancel(null);
+  Future<void> cancelAll() => cancel();
 
-  Future<bool> isCompressing() => _platform.isCompressing();
+  Future<bool> isCompressing() async =>
+      _pending.isNotEmpty || await _platform.isCompressing();
 
   /// Whether **video** compression works on this platform.
   ///
@@ -206,16 +293,31 @@ class FlutterCompress {
     int positionMs = 0,
     int quality = 80,
     int? maxWidth,
-  }) => _platform.getThumbnail(
-    path,
-    positionMs: positionMs,
-    quality: quality,
-    maxWidth: maxWidth,
+  }) => _track(
+    () => _platform.getThumbnail(
+      path,
+      positionMs: positionMs,
+      quality: quality,
+      maxWidth: maxWidth,
+    ),
   );
 
   /// Delete temporary files this plugin produced. On web this revokes every
   /// output blob: URL the engine handed out.
-  Future<void> clearCache() => _platform.clearCache();
+  Future<void> clearCache() async {
+    if (_operations != 0) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Cannot clear cache while operations are pending',
+      );
+    }
+    _clearing = true;
+    try {
+      await _platform.clearCache();
+    } finally {
+      _clearing = false;
+    }
+  }
 
   /// Release a single output once you're done with it.
   ///
@@ -230,7 +332,8 @@ class FlutterCompress {
   // A separate API surface from the video methods above; they never mix.
 
   /// Probe a source image's dimensions/size/format.
-  Future<ImageMeta> getImageInfo(String path) => _platform.getImageInfo(path);
+  Future<ImageMeta> getImageInfo(String path) =>
+      _track(() => _platform.getImageInfo(path));
 
   /// Compress a single image.
   ///
@@ -248,7 +351,10 @@ class FlutterCompress {
     String? outputDirectory,
     String? outputName,
   }) {
-    return _platform.compressImage(path, config, outputDirectory, outputName);
+    config.validate();
+    return _track(
+      () => _platform.compressImage(path, config, outputDirectory, outputName),
+    );
   }
 
   /// Compress an image **losslessly** (pixel-for-pixel) — a convenience wrapper
@@ -290,7 +396,10 @@ class FlutterCompress {
   Future<ImageBytesResult> compressImageBytes(
     Uint8List source,
     ImageCompressConfig config,
-  ) => _platform.compressImageBytes(source, config);
+  ) {
+    config.validate();
+    return _track(() => _platform.compressImageBytes(source, config));
+  }
 
   /// Compress a list of images sequentially. Each output is auto-named from its
   /// own source (base name + timestamp).
@@ -329,7 +438,7 @@ class FlutterCompress {
           ),
         );
       } catch (e) {
-        if (!continueOnError) rethrow;
+        if (!continueOnError || e is CompressCancelled) rethrow;
         onItemError?.call(i, paths[i], e);
       }
       onItemDone?.call(i, paths.length);
@@ -350,5 +459,5 @@ class FlutterCompress {
   ///
   /// [fileName] overrides the destination file name (defaults to the source's).
   Future<String> saveToDownloads(String path, {String? fileName}) =>
-      _platform.saveToDownloads(path, fileName);
+      _track(() => _platform.saveToDownloads(path, fileName));
 }

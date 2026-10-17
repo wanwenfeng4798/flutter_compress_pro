@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Update dependencies, Android build tools, and the vendored MP4Box library.
+- Fix cross-platform cancellation, concurrent job handling, cache protection, and safe output file creation.
+- Correct Apple video scaling and byte-channel results, Web timing and queue backpressure, and desktop image target-size searches.
+- Verify FFmpeg downloads with pinned builds and SHA-256 checks; add native, browser, desktop media, and Wasm regression coverage.
+
 ## 0.2.0
 
 - Bump Android / example dependencies (Media3 1.11.1, AGP 9.4.1, Kotlin 2.4.20, Gradle 9.8.0, and latest pub packages).

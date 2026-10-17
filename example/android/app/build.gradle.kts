@@ -18,7 +18,7 @@ if (hasReleaseKeystore) {
 android {
     namespace = "com.compress.all.flutter_compress_pro_example"
     compileSdk = 37
-    ndkVersion = "30.0.16138531"
+    ndkVersion = "30.0.16248370"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

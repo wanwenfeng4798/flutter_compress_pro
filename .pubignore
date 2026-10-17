@@ -25,3 +25,7 @@ migrate_working_dir/
 *.class
 *.log
 *.swp
+
+# Local native tool products.
+tool/.build/
+CODE_AUDIT.zh-CN.txt

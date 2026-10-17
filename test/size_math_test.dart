@@ -1,4 +1,4 @@
-// Boundary coverage for the shared size/bitrate math (CLAUDE.md §12.2).
+// Boundary coverage for the shared size/bitrate math.
 //
 // This is the algorithm all three platforms implement; a regression here is a
 // regression everywhere, so the edges matter more than the happy path.
@@ -208,18 +208,21 @@ void main() {
       );
     });
 
-    test('alignment none still yields even dimensions', () {
-      final (w, h) = SizeMath.targetDimensions(
-        1001,
-        667,
-        const VideoCompressConfig(
-          maxWidth: 1000,
-          alignment: DimensionAlignment.none,
-        ),
-      );
-      expect(w.isEven, isTrue);
-      expect(h.isEven, isTrue);
-    });
+    test(
+      'alignment none preserves scaled dimensions without extra rounding',
+      () {
+        final (w, h) = SizeMath.targetDimensions(
+          1001,
+          667,
+          const VideoCompressConfig(
+            maxWidth: 1000,
+            alignment: DimensionAlignment.none,
+          ),
+        );
+        expect(w.isEven, isTrue);
+        expect(h.isEven, isTrue);
+      },
+    );
 
     test('degenerate source dimensions pass through instead of throwing', () {
       expect(SizeMath.targetDimensions(0, 0, const VideoCompressConfig()), (

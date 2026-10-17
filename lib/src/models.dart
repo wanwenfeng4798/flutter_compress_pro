@@ -1,3 +1,6 @@
+import 'error_codes.dart';
+import 'exceptions.dart';
+
 // Data models & configuration for flutter_compress_pro.
 //
 // Design goal: express the *intent* of a compression job (a target size, a
@@ -241,9 +244,8 @@ class VideoCompressConfig {
 
   /// Cap the frame rate (e.g. 30). Source fps is kept if lower.
   ///
-  /// **iOS only.** Media3 has no frame-decimating effect, so Android ignores
-  /// this; on web every decoded frame is re-encoded, so it only influences the
-  /// bitrate/keyframe maths, not the output fps. Check
+  /// iOS and desktop honor this cap. Android ignores
+  /// this; on web every decoded frame is re-encoded, so the cap is ignored. Check
   /// [VideoCompressResult.frameRate] for what was actually produced.
   final double? frameRate;
 
@@ -256,15 +258,15 @@ class VideoCompressConfig {
 
   /// Re-encode audio at this bitrate (AAC).
   ///
-  /// **iOS only.** Media3 1.4.x exposes no audio-encoder settings on
+  /// Android uses its encoder default; AVFoundation and FFmpeg honor this.
+  /// Media3 exposes no audio-encoder settings on
   /// `DefaultEncoderFactory`, so Android uses its default bitrate; web has no
   /// audio at all. It still shapes the [targetSizeMB] budget on native.
   final int? audioBitrateKbps;
 
   /// Encode only this window of the source.
   ///
-  /// Android and iOS honour this. **Web does not apply it yet** (v1), though it
-  /// is still used for the bitrate budget so estimates stay consistent.
+  /// Android and iOS honour this. **Web does not apply it yet** (v1), the size budget uses the full source duration.
   final TrimRange? trim;
 
   final DimensionAlignment alignment;
@@ -292,6 +294,40 @@ class VideoCompressConfig {
   /// Output container. Defaults to [VideoContainer.auto] (keep the source's
   /// container where the platform can, else mp4).
   final VideoContainer container;
+
+  /// Validate at runtime as assertions are disabled in release builds.
+  void validate() {
+    final positive = <String, num?>{
+      'targetSizeMB': targetSizeMB,
+      'videoBitrateKbps': videoBitrateKbps,
+      'audioBitrateKbps': audioBitrateKbps,
+      'maxWidth': maxWidth,
+      'maxHeight': maxHeight,
+      'frameRate': frameRate,
+    };
+    for (final entry in positive.entries) {
+      final value = entry.value;
+      if (value != null && (!value.isFinite || value <= 0)) {
+        throw VideoCompressException(
+          CompressErrorCode.badArguments,
+          '${entry.key} must be finite and positive',
+        );
+      }
+    }
+    if ((qualityPercent != null &&
+            (qualityPercent! < 1 || qualityPercent! > 100)) ||
+        minSavingsPercent < 0 ||
+        minSavingsPercent >= 100 ||
+        (trim != null && (trim!.startMs < 0 || trim!.endMs <= trim!.startMs)) ||
+        (androidNotification != null &&
+            (androidNotification!.smallIcon.trim().isEmpty ||
+                androidNotification!.title.trim().isEmpty))) {
+      throw VideoCompressException(
+        CompressErrorCode.badArguments,
+        'Invalid video configuration',
+      );
+    }
+  }
 
   Map<String, dynamic> toMap() => {
     'quality': quality.name,
@@ -325,6 +361,7 @@ class VideoInfo {
     this.frameRate,
     this.codec,
     this.rotation = 0,
+    this.hasAudio,
   });
 
   final String path;
@@ -336,6 +373,7 @@ class VideoInfo {
   final double? frameRate;
   final String? codec;
   final int rotation;
+  final bool? hasAudio;
 
   factory VideoInfo.fromMap(Map<dynamic, dynamic> m) => VideoInfo(
     path: m['path'] as String,
@@ -347,6 +385,7 @@ class VideoInfo {
     frameRate: (m['frameRate'] as num?)?.toDouble(),
     codec: m['codec'] as String?,
     rotation: (m['rotation'] as num?)?.toInt() ?? 0,
+    hasAudio: m['hasAudio'] as bool?,
   );
 }
 

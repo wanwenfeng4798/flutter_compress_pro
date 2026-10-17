@@ -1,4 +1,4 @@
-// The channel -> typed-exception boundary (CLAUDE.md §3.4).
+// The channel -> typed-exception boundary.
 //
 // This layer had no coverage at all, and it is exactly where cross-language
 // mistakes hide: a raw PlatformException escaping, a cancel surfacing as the

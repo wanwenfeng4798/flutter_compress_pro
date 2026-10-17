@@ -21,7 +21,9 @@ import androidx.media3.transformer.TransformationRequest
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -55,15 +57,9 @@ class CompressionEngine(
      */
     private var activeCont: CancellableContinuation<ExportResult>? = null
 
-    /**
-     * A cancel that arrived before its job registered.
-     *
-     * Dart binds the job id to its token before the channel call lands, so a
-     * cancel in that window would otherwise be dropped and the job would run to
-     * completion despite the token reading cancelled. Dart issues one compress at
-     * a time, so remembering the latest id is enough.
-     */
-    private var preCancelledId: String? = null
+    /** Includes cancellation received while metadata is being prepared on IO. */
+    private val cancelledJobs = mutableSetOf<String>()
+    private var busy = false
 
     /** Whether this job started the foreground service, so `stop` stays balanced. */
     private var serviceStarted = false
@@ -94,85 +90,95 @@ class CompressionEngine(
         outputDir: String? = null,
         outputName: String? = null,
     ): Map<String, Any?> {
-        // A cancel may have landed before this call did.
-        if (preCancelledId == id) {
-            preCancelledId = null
-            throw CompressionCancelledException()
-        }
-        val info = MediaProbe.videoInfo(path)
-        val srcW = info["width"] as Int
-        val srcH = info["height"] as Int
-        val originalSize = File(path).length()
-        val durationMs = clampDuration(info["durationMs"] as Long, config)
-        val (tw, th) = SizeMath.targetDimensions(srcW, srcH, config)
-        var videoMime = resolveVideoMime(config.codec, tw, th)
-        var usedCodec = if (videoMime == MimeTypes.VIDEO_H265) "h265" else "h264"
-        val videoBps = SizeMath.videoBitrateBps(config, durationMs, info["bitrateKbps"] as Int, th)
-        // Android's Media3 muxer only produces mp4, so the extension is always
-        // mp4 regardless of the requested container.
-        val outFile = context.resolveOutput(outputDir, outputName, path, "mp4")
-
-        // What the encode actually produced, as opposed to what we asked for
-        // (CLAUDE.md §12.1). Callers can only trust a request if we report back.
-        var actualFrameRate: Double? = null
-        var actualHasAudio: Boolean? = null
-        var outDurationMs = durationMs
+        config.validate()
+        if (busy) throw BadArgumentException("Video engine is busy")
+        busy = true
+        activeId = id
+        var output: File? = null
         try {
-            val export = exportWithFallback(
-                id = id,
-                editedItem = buildEditedItem(path, config, srcW, srcH, tw, th),
-                outFile = outFile,
-                config = config,
-                videoBps = videoBps,
-                videoMime = videoMime,
-                onMimeFallback = { mime ->
-                    videoMime = mime
-                    usedCodec = if (mime == MimeTypes.VIDEO_H265) "h265" else "h264"
-                },
-            )
-            if (export.durationMs > 0) outDurationMs = export.durationMs
-            if (export.videoFrameCount > 0 && export.durationMs > 0) {
-                actualFrameRate = export.videoFrameCount * 1000.0 / export.durationMs
-            }
-            actualHasAudio = export.audioMimeType != null
+            if (cancelledJobs.contains(id)) throw CompressionCancelledException()
+            val info = withContext(Dispatchers.IO) { MediaProbe.videoInfo(path) }
+            if (cancelledJobs.contains(id)) throw CompressionCancelledException()
+            val srcW = info["width"] as Int
+            val srcH = info["height"] as Int
+            val originalSize = File(path).length()
+            val durationMs = clampDuration(info["durationMs"] as Long, config)
+            val (tw, th) = SizeMath.targetDimensions(srcW, srcH, config)
+            var videoMime = resolveVideoMime(config.codec, tw, th)
+            var usedCodec = if (videoMime == MimeTypes.VIDEO_H265) "h265" else "h264"
+            val videoBps = SizeMath.videoBitrateBps(config, durationMs, info["bitrateKbps"] as Int, th)
+            // Android's Media3 muxer only produces mp4, so the extension is always
+            // mp4 regardless of the requested container.
+            val outFile = withContext(Dispatchers.IO) { context.resolveOutput(outputDir, outputName, path, "mp4") }
+            output = outFile
 
-            // A large gap here means the encoder ignored the requested bitrate, so
-            // a target size won't be met — worth surfacing, but only when it's bad.
-            val achieved = export.averageVideoBitrate
-            if (achieved > 0 && achieved < videoBps / 2) {
-                Log.w(
-                    TAG,
-                    "encoder delivered ${achieved / 1000}kbps of ${videoBps / 1000}kbps " +
-                        "requested (${export.videoEncoderName}); output will undershoot the target",
+            // What the encode actually produced, as opposed to what we asked for
+            // . Callers can only trust a request if we report back.
+            var actualFrameRate: Double? = null
+            var actualHasAudio: Boolean? = null
+            var outDurationMs = durationMs
+            try {
+                val export = exportWithFallback(
+                    id = id,
+                    editedItem = buildEditedItem(path, config, srcW, srcH, tw, th),
+                    outFile = outFile,
+                    config = config,
+                    videoBps = videoBps,
+                    videoMime = videoMime,
+                    onMimeFallback = { mime ->
+                        videoMime = mime
+                        usedCodec = if (mime == MimeTypes.VIDEO_H265) "h265" else "h264"
+                    },
                 )
-            }
-        } catch (e: Throwable) {
-            // Cancellation and export errors both leave a partially muxed file
-            // behind; don't let it accumulate in the cache.
-            outFile.delete()
-            throw e
-        }
+                if (export.durationMs > 0) outDurationMs = export.durationMs
+                if (export.videoFrameCount > 0 && export.durationMs > 0) {
+                    actualFrameRate = export.videoFrameCount * 1000.0 / export.durationMs
+                }
+                actualHasAudio = export.audioMimeType != null
 
-        val compressedSize = outFile.length()
-        val skipped = SizeMath.keepsOriginal(
-            compressedSize, originalSize, config.keepOriginalIfLarger, config.minSavingsPercent,
-        )
-        if (skipped) outFile.delete()
-        return mapOf(
-            "id" to id,
-            "outputPath" to if (skipped) path else outFile.absolutePath,
-            "originalSizeBytes" to originalSize,
-            "compressedSizeBytes" to if (skipped) originalSize else compressedSize,
-            "width" to if (skipped) srcW else tw,
-            "height" to if (skipped) srcH else th,
-            // The *output* duration: a muxer told the wrong duration truncates
-            // the file, and reporting the source length would hide that.
-            "durationMs" to if (skipped) durationMs else outDurationMs,
-            "codec" to usedCodec,
-            "skipped" to skipped,
-            "frameRate" to actualFrameRate,
-            "hasAudio" to if (skipped) null else actualHasAudio,
-        )
+                // A large gap here means the encoder ignored the requested bitrate, so
+                // a target size won't be met — worth surfacing, but only when it's bad.
+                val achieved = export.averageVideoBitrate
+                if (achieved > 0 && achieved < videoBps / 2) {
+                    Log.w(
+                        TAG,
+                        "encoder delivered ${achieved / 1000}kbps of ${videoBps / 1000}kbps " +
+                            "requested (${export.videoEncoderName}); output will undershoot the target",
+                    )
+                }
+            } catch (e: Throwable) {
+                // Cancellation and export errors both leave a partially muxed file
+                // behind; don't let it accumulate in the cache.
+                outFile.delete()
+                throw e
+            }
+
+            val compressedSize = outFile.length()
+            val skipped = SizeMath.keepsOriginal(
+                compressedSize, originalSize, config.keepOriginalIfLarger, config.minSavingsPercent,
+            )
+            if (skipped) outFile.delete()
+            return mapOf(
+                "id" to id,
+                "outputPath" to if (skipped) path else outFile.absolutePath,
+                "originalSizeBytes" to originalSize,
+                "compressedSizeBytes" to if (skipped) originalSize else compressedSize,
+                "width" to if (skipped) srcW else tw,
+                "height" to if (skipped) srcH else th,
+                // The *output* duration: a muxer told the wrong duration truncates
+                // the file, and reporting the source length would hide that.
+                "durationMs" to if (skipped) info["durationMs"] else outDurationMs,
+                "codec" to if (skipped) info["codec"] ?: "unknown" else usedCodec,
+                "skipped" to skipped,
+                "frameRate" to if (skipped) info["frameRate"] else actualFrameRate,
+                "hasAudio" to if (skipped) info["hasAudio"] else actualHasAudio,
+            )
+        } finally {
+            output?.let { releaseOutput(it) }
+            finishJob()
+            busy = false
+            cancelledJobs.remove(id)
+        }
     }
 
     private fun buildEditedItem(
@@ -261,8 +267,9 @@ class CompressionEngine(
         var forceVbr = false
         var lastError: Throwable? = null
 
-        suspend fun once(): ExportResult =
-            runTransformer(
+        suspend fun once(): ExportResult {
+            if (cancelledJobs.contains(id)) throw CompressionCancelledException()
+            return runTransformer(
                 id,
                 editedItem,
                 outFile,
@@ -270,6 +277,7 @@ class CompressionEngine(
                 encoderSettings(config, mime, videoBps, forceVbr),
                 config.notification,
             )
+        }
 
         repeat(4) {
             try {
@@ -286,6 +294,7 @@ class CompressionEngine(
                         forceVbr = true
                         outFile.delete()
                     }
+
                     mime == MimeTypes.VIDEO_H265 -> {
                         Log.w(TAG, "HEVC encode unsupported; falling back to H.264: ${describeThrowable(e)}")
                         mime = MimeTypes.VIDEO_H264
@@ -293,6 +302,7 @@ class CompressionEngine(
                         forceVbr = false
                         outFile.delete()
                     }
+
                     else -> throw e
                 }
             }
@@ -375,8 +385,14 @@ class CompressionEngine(
         activeId = id
         activeCont = cont
         serviceStarted = CompressionService.start(context, notification)
-        transformer.start(editedItem, outFile.absolutePath)
-        startProgressPolling(id, outFile)
+        try {
+            transformer.start(editedItem, outFile.absolutePath)
+            startProgressPolling(id, outFile)
+        } catch (error: Throwable) {
+            runCatching { transformer.cancel() }
+            finishJob()
+            if (cont.isActive) cont.resumeWithException(error)
+        }
         cont.invokeOnCancellation { mainHandler.post { runCatching { transformer.cancel() } } }
     }
 
@@ -441,13 +457,9 @@ class CompressionEngine(
      * Runs on the main looper, where all job state is mutated.
      */
     private fun abort(id: String?) {
-        if (id == null) return
-        if (id != activeId) {
-            // Either already finished, or it hasn't registered yet — remember it
-            // so compress() can refuse to start.
-            preCancelledId = id
-            return
-        }
+        if (id == null || id != activeId) return
+        cancelledJobs.add(id)
+        if (activeTransformer == null) return
         cancelledId = id
         runCatching { activeTransformer?.cancel() }
         val cont = activeCont
@@ -458,14 +470,18 @@ class CompressionEngine(
         }
     }
 
-    fun isCompressing(): Boolean = activeTransformer != null
+    fun isCompressing(): Boolean = busy
 
     // ---- helpers -----------------------------------------------------------
 
     private fun clampDuration(fullDurationMs: Long, config: CompressionConfig): Long {
         val s = config.trimStartMs
         val e = config.trimEndMs
-        return if (s != null && e != null) (e - s).coerceAtLeast(1) else fullDurationMs
+        if (s != null && e != null) {
+            if (s < 0 || s >= fullDurationMs || e <= s) throw BadArgumentException("Invalid trim range")
+            return e.coerceAtMost(fullDurationMs) - s
+        }
+        return fullDurationMs
     }
 
     /**
@@ -485,7 +501,7 @@ class CompressionEngine(
                 EncoderUtil.isSizeSupported(it, MimeTypes.VIDEO_H265, width, height)
             }
             if (!sizeOk) {
-                Log.w(TAG, "no HEVC encoder for ${width}x${height}; using H.264")
+                Log.w(TAG, "no HEVC encoder for ${width}x$height; using H.264")
                 return MimeTypes.VIDEO_H264
             }
         }

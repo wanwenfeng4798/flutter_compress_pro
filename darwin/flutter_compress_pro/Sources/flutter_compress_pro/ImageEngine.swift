@@ -9,8 +9,7 @@ enum ImageEngine {
 
   private static let minQuality = 1
   private static let maxQuality = 100
-  private static let maxDownscales = 5
-  private static let minSide = 32
+  private static let maxDownscales = 24
 
   static func info(path: String) throws -> [String: Any] {
     guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else {
@@ -60,11 +59,12 @@ enum ImageEngine {
         "skipped": true,
       ]
     }
-    let dest = PluginFiles.resolveOutput(
+    let dest = try PluginFiles.resolveOutput(
       outputDir: outputDir, outputName: outputName, sourcePath: path, ext: ext(out.format))
     try? FileManager.default.createDirectory(
       at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try out.data.write(to: dest)
+    defer { PluginFiles.release(dest) }
+    try out.data.write(to: dest, options: .atomic)
     return [
       "outputPath": dest.path,
       "originalSizeBytes": originalSize,
@@ -96,6 +96,7 @@ enum ImageEngine {
   private static func encode(
     _ src: CGImageSource, _ originalSize: Int64, _ config: ImageConfig
   ) throws -> EncodeOutcome {
+    try config.validate()
     let source = try probe(src)
 
     // A nil format keeps the source's format. ImageIO can't encode WebP → JPEG;
@@ -127,12 +128,15 @@ enum ImageEngine {
     var fitted = try fit(image, uti, lossy, quality, target, exif, minQuality)
     var tries = 0
     while let limit = target, fitted.data.count > limit,
-      tries < maxDownscales, image.width > minSide {
+      tries < maxDownscales, image.width > 1 || image.height > 1 {
       // Resample the image we already decoded instead of re-decoding the file.
-      image = try resized(image, image.width * 3 / 4, image.height * 3 / 4)
+      image = try resized(image, max(1, image.width * 3 / 4), max(1, image.height * 3 / 4))
       // A smaller image fits at least the quality the last round reached.
       fitted = try fit(image, uti, lossy, quality, target, exif, fitted.quality)
       tries += 1
+    }
+    if let target = target, fitted.data.count > target {
+      throw err("Target image size cannot be met")
     }
     let data = fitted.data
 

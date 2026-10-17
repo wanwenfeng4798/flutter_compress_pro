@@ -1,5 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import '../error_codes.dart';
 import '../exceptions.dart';
@@ -23,8 +25,8 @@ class FfmpegPaths {
 abstract final class FfmpegDownloader {
   /// Pin deliberately — bump when upgrading the downloaded FFmpeg build.
   /// Assets come from https://github.com/BtbN/FFmpeg-Builds/releases
-  static const releaseTag = 'latest';
-  static const buildId = 'master-latest';
+  static const releaseTag = 'autobuild-2026-10-16-13-04';
+  static const buildId = 'N-127579-g5cb9fcd211';
 
   /// `gpl` includes libx264/libx265; `lgpl` would not encode H.264/H.265.
   static const licenseVariant = 'gpl';
@@ -38,7 +40,7 @@ abstract final class FfmpegDownloader {
       '$home${Platform.pathSeparator}.cache'
       '${Platform.pathSeparator}flutter_compress_pro'
       '${Platform.pathSeparator}ffmpeg'
-      '${Platform.pathSeparator}$buildId',
+      '${Platform.pathSeparator}$buildId-${Abi.current()}',
     );
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
@@ -47,79 +49,116 @@ abstract final class FfmpegDownloader {
   }
 
   static Future<FfmpegPaths?> cachedBinaries() async {
-    final root = cacheRoot();
+    final root = Directory(
+      '${cacheRoot().path}${Platform.pathSeparator}installed',
+    );
     final ffmpeg = File(_binPath(root, 'ffmpeg'));
     final ffprobe = File(_binPath(root, 'ffprobe'));
-    if (await ffmpeg.exists() && await ffprobe.exists()) {
-      await _chmodX(ffmpeg.path);
-      await _chmodX(ffprobe.path);
-      return FfmpegPaths(ffmpeg: ffmpeg.path, ffprobe: ffprobe.path);
+    final manifest = File(
+      '${root.path}${Platform.pathSeparator}integrity.json',
+    );
+    if (!await manifest.exists() ||
+        !await ffmpeg.exists() ||
+        !await ffprobe.exists()) {
+      return null;
     }
-    return null;
+    try {
+      final hashes = jsonDecode(await manifest.readAsString()) as Map;
+      for (final file in [ffmpeg, ffprobe]) {
+        if ((await sha256.bind(file.openRead()).first).toString() !=
+            hashes[file.uri.pathSegments.last]) {
+          return null;
+        }
+      }
+      return FfmpegPaths(ffmpeg: ffmpeg.path, ffprobe: ffprobe.path);
+    } catch (_) {
+      return null;
+    }
   }
 
+  static const archiveHashes = {
+    'linux64':
+        '3d994f31aa9ee78ef56eab530a86d50d8307200cb9d1788be36c1ea9410e605c',
+    'linuxarm64':
+        '56c9cd900daa38fd07eaab8e144e577fe637293d376a0b33de21364923a90709',
+    'win64': 'b7c94a054ae4c1cce0e11ae18979d932e6f129ba6f5253b328227b31f1bf2bbf',
+    'winarm64':
+        '3b77967d7ce8102d288cb9443227b344156d97edd97a18acd7819806f5faa932',
+  };
+
   static Future<FfmpegPaths> download() async {
-    final asset = _assetName();
-    final url =
-        'https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag/$asset';
     final root = cacheRoot();
-    final archivePath = '${root.path}${Platform.pathSeparator}$asset';
-
-    HttpClient? client;
+    final lock = await File(
+      '${root.path}${Platform.pathSeparator}install.lock',
+    ).open(mode: FileMode.append);
+    await lock.lock(FileLock.blockingExclusive);
+    Directory? scratch;
     try {
-      client = HttpClient();
-      final request = await client.getUrl(Uri.parse(url));
-      final response = await request.close();
-      if (response.statusCode != 200) {
-        throw VideoCompressException(
-          CompressErrorCode.unsupported,
-          'FFmpeg download failed HTTP ${response.statusCode} for $url',
-        );
+      final cached = await cachedBinaries();
+      if (cached != null) return cached;
+      scratch = await root.createTemp('download-');
+      final asset = _assetName();
+      final url =
+          'https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag/$asset';
+      final archive = File('${scratch.path}${Platform.pathSeparator}$asset');
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 30);
+      try {
+        final response = await (await client.getUrl(Uri.parse(url))).close();
+        if (response.statusCode != 200) {
+          throw HttpException(
+            'FFmpeg HTTP ${response.statusCode}',
+            uri: Uri.parse(url),
+          );
+        }
+        await response
+            .timeout(const Duration(minutes: 2))
+            .pipe(archive.openWrite());
+      } finally {
+        client.close(force: true);
       }
-      final sink = File(archivePath).openWrite();
-      await response.pipe(sink);
-      await sink.close();
+      final platform = archiveHashes.keys.singleWhere(
+        (key) => asset.contains('-$key-'),
+      );
+      final digest = (await sha256.bind(archive.openRead()).first).toString();
+      if (digest != archiveHashes[platform]) {
+        throw const FormatException('FFmpeg archive SHA-256 mismatch');
+      }
+      await _extract(archive.path, scratch);
+      final bin = await _findBinDir(scratch);
+      if (bin == null) {
+        throw const FormatException('FFmpeg archive has no bin directory');
+      }
+      final install = await scratch.createTemp('install-');
+      final hashes = <String, String>{};
+      for (final name in ['ffmpeg', 'ffprobe']) {
+        final executable = Platform.isWindows ? '$name.exe' : name;
+        final file = await File(
+          '${bin.path}${Platform.pathSeparator}$executable',
+        ).copy(_binPath(install, name));
+        await _chmodX(file.path);
+        hashes[executable] = (await sha256.bind(file.openRead()).first)
+            .toString();
+      }
+      await File(
+        '${install.path}${Platform.pathSeparator}integrity.json',
+      ).writeAsString(jsonEncode(hashes), flush: true);
+      final destination = Directory(
+        '${root.path}${Platform.pathSeparator}installed',
+      );
+      if (await destination.exists()) await destination.delete(recursive: true);
+      await install.rename(destination.path);
+      return FfmpegPaths(
+        ffmpeg: _binPath(destination, 'ffmpeg'),
+        ffprobe: _binPath(destination, 'ffprobe'),
+      );
     } finally {
-      client?.close(force: true);
+      if (scratch != null && await scratch.exists()) {
+        await scratch.delete(recursive: true);
+      }
+      await lock.unlock();
+      await lock.close();
     }
-
-    await _extract(archivePath, root);
-    try {
-      await File(archivePath).delete();
-    } catch (_) {}
-
-    // BtbN archives unpack to `<name>/bin/{ffmpeg,ffprobe}`.
-    final binDir = await _findBinDir(root);
-    if (binDir == null) {
-      throw VideoCompressException(
-        CompressErrorCode.unsupported,
-        'Downloaded FFmpeg archive had no bin/ directory',
-      );
-    }
-
-    final ffmpegSrc = File(
-      '${binDir.path}${Platform.pathSeparator}ffmpeg'
-      '${Platform.isWindows ? '.exe' : ''}',
-    );
-    final ffprobeSrc = File(
-      '${binDir.path}${Platform.pathSeparator}ffprobe'
-      '${Platform.isWindows ? '.exe' : ''}',
-    );
-    if (!await ffmpegSrc.exists() || !await ffprobeSrc.exists()) {
-      throw VideoCompressException(
-        CompressErrorCode.unsupported,
-        'Downloaded FFmpeg archive missing ffmpeg/ffprobe binaries',
-      );
-    }
-
-    final ffmpegDest = File(_binPath(root, 'ffmpeg'));
-    final ffprobeDest = File(_binPath(root, 'ffprobe'));
-    await ffmpegSrc.copy(ffmpegDest.path);
-    await ffprobeSrc.copy(ffprobeDest.path);
-    await _chmodX(ffmpegDest.path);
-    await _chmodX(ffprobeDest.path);
-
-    return FfmpegPaths(ffmpeg: ffmpegDest.path, ffprobe: ffprobeDest.path);
   }
 
   static String _binPath(Directory root, String name) {
@@ -164,22 +203,26 @@ abstract final class FfmpegDownloader {
   static Future<void> _extract(String archivePath, Directory dest) async {
     if (archivePath.endsWith('.zip')) {
       // Prefer tar (Windows 10+ / bsdtar) then PowerShell.
-      final tar = await Process.run('tar', [
-        '-xf',
-        archivePath,
-        '-C',
-        dest.path,
-      ]);
-      if (tar.exitCode == 0) return;
-      final ps = await Process.run('powershell', [
-        '-NoProfile',
-        '-Command',
-        "Expand-Archive -LiteralPath '$archivePath' -DestinationPath '${dest.path}' -Force",
-      ]);
+      ProcessResult? tar;
+      try {
+        tar = await Process.run('tar', ['-xf', archivePath, '-C', dest.path]);
+      } on ProcessException {
+        /* Use PowerShell when tar is absent. */
+      }
+      if (tar?.exitCode == 0) return;
+      final ps = await Process.run(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          r'Expand-Archive -LiteralPath $env:FCP_ARCHIVE -DestinationPath $env:FCP_DEST -Force',
+        ],
+        environment: {'FCP_ARCHIVE': archivePath, 'FCP_DEST': dest.path},
+      );
       if (ps.exitCode != 0) {
         throw VideoCompressException(
           CompressErrorCode.unsupported,
-          'Failed to extract FFmpeg zip (tar: ${tar.stderr}; powershell: ${ps.stderr})',
+          'Failed to extract FFmpeg zip (tar: ${tar?.stderr}; powershell: ${ps.stderr})',
         );
       }
       return;

@@ -19,6 +19,18 @@ data class CompressionConfig(
     val minSavingsPercent: Int,
     val notification: CompressionService.NotificationSpec?,
 ) {
+    fun validate() {
+        if (listOf(targetSizeMB, videoBitrateKbps, audioBitrateKbps, maxWidth, maxHeight).any {
+                it != null && it <= 0
+            } ||
+            frameRate?.let { !it.isFinite() || it <= 0 } == true ||
+            qualityPercent?.let { it !in 1..100 } == true || minSavingsPercent !in 0..99 ||
+            trimStartMs?.let { it < 0 || trimEndMs == null || trimEndMs <= it } == true
+        ) {
+            throw BadArgumentException("Invalid video configuration")
+        }
+    }
+
     companion object {
         fun fromMap(m: Map<String, Any?>): CompressionConfig {
             @Suppress("UNCHECKED_CAST")
@@ -43,7 +55,7 @@ data class CompressionConfig(
                 keepOriginalIfLarger = m["keepOriginalIfLarger"] as? Boolean ?: true,
                 minSavingsPercent = (m["minSavingsPercent"] as? Number)?.toInt() ?: 0,
                 notification = CompressionService.NotificationSpec.fromMap(notification),
-            )
+            ).also { it.validate() }
         }
     }
 }

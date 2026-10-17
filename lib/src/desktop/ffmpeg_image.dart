@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import '../error_codes.dart';
 import '../exceptions.dart';
 import '../image_models.dart';
+import '../size_math.dart';
 import 'ffmpeg_binaries.dart';
 import 'plugin_cache.dart';
 
@@ -63,7 +64,7 @@ abstract final class FfmpegImage {
     required String? outputDir,
     required String? outputName,
   }) async {
-    await FfmpegBinaries.ensureAvailable();
+    config.validate();
     final meta = await info(path);
     final originalSize = meta.sizeBytes;
     final format = _resolveFormat(config, meta.format);
@@ -74,65 +75,69 @@ abstract final class FfmpegImage {
       ext: _extFor(format),
     );
 
-    await _encode(
-      inputPath: path,
-      outputPath: out.path,
-      config: config,
-      format: format,
-      srcW: meta.width,
-      srcH: meta.height,
-      keepExif: config.keepExif,
-    );
-
-    final compressedSize = await File(out.path).length();
-    final dims = await _probeDims(out.path);
-    final savedPct = originalSize == 0
-        ? 0.0
-        : (1 - compressedSize / originalSize) * 100;
-    final shouldSkip =
-        config.keepOriginalIfLarger &&
-        (compressedSize >= originalSize || savedPct < config.minSavingsPercent);
-    if (shouldSkip) {
-      try {
-        await File(out.path).delete();
-      } catch (_) {}
-      return ImageCompressResult(
-        outputPath: path,
-        originalSizeBytes: originalSize,
-        compressedSizeBytes: originalSize,
-        width: meta.width,
-        height: meta.height,
-        format: meta.format ?? format,
-        skipped: true,
+    try {
+      await _encode(
+        inputPath: path,
+        outputPath: out.path,
+        config: config,
+        format: format,
+        srcW: meta.width,
+        srcH: meta.height,
+        keepExif: config.keepExif,
       );
+
+      final compressedSize = await File(out.path).length();
+      final dims = await _probeDims(out.path);
+      final shouldSkip = SizeMath.keepsOriginal(
+        compressedSize,
+        originalSize,
+        config.keepOriginalIfLarger,
+        config.minSavingsPercent,
+      );
+      if (shouldSkip) {
+        try {
+          await File(out.path).delete();
+        } catch (_) {}
+        return ImageCompressResult(
+          outputPath: path,
+          originalSizeBytes: originalSize,
+          compressedSizeBytes: originalSize,
+          width: meta.width,
+          height: meta.height,
+          format: meta.format ?? format,
+          skipped: true,
+        );
+      }
+      return ImageCompressResult(
+        outputPath: out.path,
+        originalSizeBytes: originalSize,
+        compressedSizeBytes: compressedSize,
+        width: dims.$1,
+        height: dims.$2,
+        format: format == 'heic' ? 'jpeg' : format,
+        skipped: false,
+      );
+    } catch (_) {
+      if (await out.exists()) await out.delete();
+      rethrow;
+    } finally {
+      PluginCache.release(out);
     }
-    return ImageCompressResult(
-      outputPath: out.path,
-      originalSizeBytes: originalSize,
-      compressedSizeBytes: compressedSize,
-      width: dims.$1,
-      height: dims.$2,
-      format: format == 'heic' ? 'jpeg' : format,
-      skipped: false,
-    );
   }
 
   static Future<ImageBytesResult> compressBytes({
     required Uint8List source,
     required ImageCompressConfig config,
   }) async {
-    await FfmpegBinaries.ensureAvailable();
-    final tmpIn = File(
-      '${PluginCache.cacheDir().path}${Platform.pathSeparator}'
-      'in_${DateTime.now().millisecondsSinceEpoch}.img',
-    );
-    await tmpIn.writeAsBytes(source, flush: true);
+    config.validate();
+    final scratch = await PluginCache.cacheDir().createTemp('image-');
+    final tmpIn = File('${scratch.path}${Platform.pathSeparator}input.img');
     try {
+      await tmpIn.writeAsBytes(source, flush: true);
       final meta = await info(tmpIn.path);
       final format = _resolveFormat(config, meta.format);
       final tmpOut = File(
-        '${PluginCache.cacheDir().path}${Platform.pathSeparator}'
-        'out_${DateTime.now().millisecondsSinceEpoch}.${_extFor(format)}',
+        '${scratch.path}${Platform.pathSeparator}output.${_extFor(format)}',
       );
       await _encode(
         inputPath: tmpIn.path,
@@ -149,13 +154,12 @@ abstract final class FfmpegImage {
         await tmpOut.delete();
       } catch (_) {}
 
-      final savedPct = source.isEmpty
-          ? 0.0
-          : (1 - bytes.length / source.length) * 100;
-      final shouldSkip =
-          config.keepOriginalIfLarger &&
-          (bytes.length >= source.length ||
-              savedPct < config.minSavingsPercent);
+      final shouldSkip = SizeMath.keepsOriginal(
+        bytes.length,
+        source.length,
+        config.keepOriginalIfLarger,
+        config.minSavingsPercent,
+      );
       if (shouldSkip) {
         return ImageBytesResult(
           bytes: source,
@@ -176,7 +180,7 @@ abstract final class FfmpegImage {
       );
     } finally {
       try {
-        await tmpIn.delete();
+        await scratch.delete(recursive: true);
       } catch (_) {}
     }
   }
@@ -190,45 +194,110 @@ abstract final class FfmpegImage {
     required int srcH,
     required bool keepExif,
   }) async {
-    final scale = _scaleFilter(srcW, srcH, config.maxWidth, config.maxHeight);
+    final scratch = await PluginCache.cacheDir().createTemp('encode-');
+    try {
+      // Decode/orient/cap the source once before the quality search.
+      final master = '${scratch.path}${Platform.pathSeparator}master.png';
+      final scale = _scaleFilter(srcW, srcH, config.maxWidth, config.maxHeight);
+      final decode = await Process.run(FfmpegBinaries.ffmpeg, [
+        '-y',
+        '-i',
+        inputPath,
+        if (scale != null) ...['-vf', scale],
+        '-frames:v',
+        '1',
+        '-c:v',
+        'png',
+        master,
+      ]);
+      if (decode.exitCode != 0) {
+        throw ImageCompressException(
+          CompressErrorCode.imageCompressFailed,
+          '${decode.stderr}',
+        );
+      }
+      final target = config.lossless
+          ? null
+          : config.targetSizeKB == null
+          ? null
+          : config.targetSizeKB! * 1024;
+      final dims = await info(master);
+      var width = dims.width;
+      var height = dims.height;
+      for (var round = 0; round < 24; round++) {
+        Future<Uint8List> encode(int quality) async {
+          final result = await Process.run(FfmpegBinaries.ffmpeg, [
+            '-y',
+            '-i',
+            master,
+            '-i',
+            inputPath,
+            '-map',
+            '0:v:0',
+            ...(keepExif ? ['-map_metadata', '1'] : ['-map_metadata', '-1']),
+            '-vf',
+            'scale=$width:$height',
+            '-frames:v',
+            '1',
+            ..._codecArgs(format, config, quality: quality),
+            outputPath,
+          ]);
+          if (result.exitCode != 0) {
+            throw ImageCompressException(
+              CompressErrorCode.imageCompressFailed,
+              '${result.stderr}',
+            );
+          }
+          final bytes = await File(outputPath).readAsBytes();
+          if (bytes.isEmpty) {
+            throw ImageCompressException(
+              CompressErrorCode.imageCompressFailed,
+              'Empty encoded image',
+            );
+          }
+          return bytes;
+        }
 
-    if (config.targetSizeKB != null &&
-        !config.lossless &&
-        (format == 'jpeg' || format == 'heic')) {
-      await _encodeToTargetSize(
-        inputPath: inputPath,
-        outputPath: outputPath,
-        scale: scale,
-        targetBytes: config.targetSizeKB! * 1024,
-        keepExif: keepExif,
-      );
-      return;
-    }
-
-    final args = <String>['-y', '-i', inputPath];
-    args.addAll(_metadataArgs(keepExif));
-    if (scale != null) args.addAll(['-vf', scale]);
-    args.addAll(_codecArgs(format, config));
-    args.add(outputPath);
-
-    final result = await Process.run(FfmpegBinaries.ffmpeg, args);
-    if (result.exitCode != 0) {
+        Uint8List? best;
+        if (target == null || format == 'png') {
+          final bytes = await encode(config.quality);
+          if (target == null || bytes.length <= target) best = bytes;
+        } else {
+          var low = 1, high = 100;
+          while (low <= high) {
+            final quality = (low + high) ~/ 2;
+            final bytes = await encode(quality);
+            if (bytes.length <= target) {
+              best = bytes;
+              low = quality + 1;
+            } else {
+              high = quality - 1;
+            }
+          }
+        }
+        if (best != null) {
+          await File(outputPath).writeAsBytes(best);
+          return;
+        }
+        if (width == 1 && height == 1) break;
+        width = (width * 0.75).floor().clamp(1, width);
+        height = (height * 0.75).floor().clamp(1, height);
+      }
       throw ImageCompressException(
         CompressErrorCode.imageCompressFailed,
-        'ffmpeg image encode failed: ${result.stderr}',
+        'Target size cannot be met by this format including metadata',
       );
+    } finally {
+      await scratch.delete(recursive: true);
     }
   }
 
-  /// Copy or strip container/stream metadata (EXIF for JPEG, etc.).
-  ///
-  /// When [keepExif] is true we map all metadata from the first input; when
-  /// false we strip it. Matches Android/iOS intent for JPEG; WebP/PNG support
-  /// depends on the FFmpeg build.
-  static List<String> _metadataArgs(bool keepExif) =>
-      keepExif ? const ['-map_metadata', '0'] : const ['-map_metadata', '-1'];
-
-  static List<String> _codecArgs(String format, ImageCompressConfig config) {
+  static List<String> _codecArgs(
+    String format,
+    ImageCompressConfig config, {
+    int? quality,
+  }) {
+    final q = quality ?? config.quality;
     switch (format) {
       case 'png':
         return ['-c:v', 'png'];
@@ -236,45 +305,14 @@ abstract final class FfmpegImage {
         if (config.lossless) {
           return ['-c:v', 'libwebp', '-lossless', '1'];
         }
-        return ['-c:v', 'libwebp', '-quality', '${config.quality}'];
+        return ['-c:v', 'libwebp', '-quality', '$q'];
       default:
         return [
           '-c:v',
           'mjpeg',
           '-q:v',
-          '${_jpegQ(config.lossless ? 100 : config.quality)}',
+          '${_jpegQ(config.lossless ? 100 : q)}',
         ];
-    }
-  }
-
-  static Future<void> _encodeToTargetSize({
-    required String inputPath,
-    required String outputPath,
-    required String? scale,
-    required int targetBytes,
-    required bool keepExif,
-  }) async {
-    var lo = 2;
-    var hi = 31;
-    for (var i = 0; i < 8; i++) {
-      final mid = (lo + hi) ~/ 2;
-      final args = <String>['-y', '-i', inputPath];
-      args.addAll(_metadataArgs(keepExif));
-      if (scale != null) args.addAll(['-vf', scale]);
-      args.addAll(['-c:v', 'mjpeg', '-q:v', '$mid', outputPath]);
-      final result = await Process.run(FfmpegBinaries.ffmpeg, args);
-      if (result.exitCode != 0) {
-        throw ImageCompressException(
-          CompressErrorCode.imageCompressFailed,
-          'ffmpeg image encode failed: ${result.stderr}',
-        );
-      }
-      final size = await File(outputPath).length();
-      if (size > targetBytes) {
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
     }
   }
 
@@ -305,9 +343,7 @@ abstract final class FfmpegImage {
     final rw = tw.round();
     final rh = th.round();
     if (rw == w && rh == h) return null;
-    final ew = rw.isEven ? rw : rw - 1;
-    final eh = rh.isEven ? rh : rh - 1;
-    return 'scale=${ew < 2 ? 2 : ew}:${eh < 2 ? 2 : eh}';
+    return 'scale=${rw.clamp(1, w)}:${rh.clamp(1, h)}';
   }
 
   static String _resolveFormat(ImageCompressConfig config, String? source) {
@@ -319,7 +355,7 @@ abstract final class FfmpegImage {
         ImageFormat.heic => 'heic',
       };
     }
-    return source ?? 'jpeg';
+    return source == 'png' || source == 'webp' ? source! : 'jpeg';
   }
 
   static String _extFor(String format) => switch (format) {

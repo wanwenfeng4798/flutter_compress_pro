@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Compression browser regression</title>
+<script src="/assets/mp4box.all.min.js"></script>
+<script src="/assets/mp4-muxer.js"></script>
+<script src="/assets/flutter_compress_pro_web.js"></script>
+<script>
+window.regression = (async () => {
+  const engine = window.flutterCompressWeb;
+  if (!await engine.canEncode()) throw new Error('H.264 WebCodecs encoder unavailable');
+  const path = '/example/assets/sample.mp4';
+  const source = await engine.getInfo(path);
+  const seen = [];
+  const result = await engine.compress(path, {
+    id: 'browser-regression', targetWidth: 320, targetHeight: 176,
+    videoBitrateBps: 400000, frameRate: 30, codec: 'h264',
+    originalSizeBytes: source.sizeBytes, keepOriginalIfLarger: false,
+  }, (fraction) => seen.push(fraction));
+  const actual = await engine.getInfo(result.outputUrl);
+  if (actual.width !== 320 || actual.height !== 176) throw new Error('Wrong output dimensions');
+  if (Math.abs(actual.durationMs - source.durationMs) > 200) throw new Error('Output duration drift');
+  if (Math.abs(result.durationMs - actual.durationMs) > 60) throw new Error('Reported duration differs from output');
+  if (Math.abs(result.frameRate - source.frameRate) > 1) throw new Error('Reported frame rate differs from source');
+  if (seen.at(-1) !== 1) throw new Error('Progress did not reach completion');
+  engine.revoke(result.outputUrl);
+  engine.revokeAll();
+  return { passed: true, sourceDurationMs: source.durationMs, outputDurationMs: actual.durationMs,
+    reportedDurationMs: result.durationMs, frameRate: result.frameRate, bytes: result.sizeBytes };
+})();
+</script>

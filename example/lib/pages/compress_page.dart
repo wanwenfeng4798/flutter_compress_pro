@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:async';
+import '../models/demo_session.dart';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -27,7 +29,8 @@ class CompressPage extends StatefulWidget {
   State<CompressPage> createState() => _CompressPageState();
 }
 
-class _CompressPageState extends State<CompressPage> {
+class _CompressPageState extends State<CompressPage>
+    with DemoSession<CompressPage> {
   final _compressor = FlutterCompress.instance;
 
   // Inputs.
@@ -54,7 +57,7 @@ class _CompressPageState extends State<CompressPage> {
   // dart:io Platform throws on web (which this plugin doesn't target); guard it.
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
-  void _appendLog(String line) => setState(() => _log = '$line\n$_log');
+  void _appendLog(String line) => setState(() => _log = prependLog(_log, line));
 
   VideoCompressConfig _buildConfig() {
     // Target-size mode keeps the source resolution so the bitrate budget alone
@@ -86,7 +89,9 @@ class _CompressPageState extends State<CompressPage> {
     final l10n = AppLocalizations.of(context);
     // pickFile() returns a single PlatformFile; xFile.path is a real path on
     // native and a blob: URL on web.
+    final revision = ++inputRevision;
     final file = await FilePicker.pickFile(type: FileType.video);
+    if (!mounted || revision != inputRevision) return;
     final path = file?.xFile.path;
     if (path == null || path.isEmpty) return;
     setState(() {
@@ -106,6 +111,7 @@ class _CompressPageState extends State<CompressPage> {
           maxWidth: 320,
         );
       } catch (_) {}
+      if (!mounted || revision != inputRevision) return;
       final srcMB = (info.sizeBytes / 1024 / 1024).ceil();
       setState(() {
         _videoInfo = info;
@@ -121,7 +127,7 @@ class _CompressPageState extends State<CompressPage> {
   Future<void> _pickOutputDir() async {
     final l10n = AppLocalizations.of(context);
     final dir = await FilePicker.getDirectoryPath();
-    if (dir != null) {
+    if (mounted && dir != null) {
       setState(() => _outputDir = dir);
       _appendLog(l10n.logOutputDir(dir));
     }
@@ -131,8 +137,15 @@ class _CompressPageState extends State<CompressPage> {
     final path = _inputPath;
     if (path == null) return;
     try {
-      final est = await _compressor.estimate(path, _buildConfig());
-      if (mounted) setState(() => _est = est);
+      final revision = inputRevision;
+      final config = _buildConfig();
+      final est = await _compressor.estimate(path, config);
+      if (mounted &&
+          revision == inputRevision &&
+          path == _inputPath &&
+          config.toMap().toString() == _buildConfig().toMap().toString()) {
+        setState(() => _est = est);
+      }
     } catch (_) {
       // silent — the estimate card just won't update
     }
@@ -199,6 +212,8 @@ class _CompressPageState extends State<CompressPage> {
         onProgress: (p) => setState(() => _progress = p.progress),
         cancellationToken: _token,
       );
+      await ownOutput(result.outputPath, skipped: result.skipped);
+      if (!mounted) return;
       if (result.skipped) {
         _appendLog(l10n.logSkipped);
       } else {
@@ -218,7 +233,7 @@ class _CompressPageState extends State<CompressPage> {
           // MIME type.
           final segment = result.outputPath.split('/').last;
           final ext = segment.contains('.') ? segment.split('.').last : null;
-          final saved = await _compressor.saveToDownloads(
+          final saved = await saveOutput(
             result.outputPath,
             fileName: ext == null
                 ? null
@@ -236,6 +251,13 @@ class _CompressPageState extends State<CompressPage> {
     } finally {
       setState(() => _busy = false);
     }
+  }
+
+  @override
+  void dispose() {
+    final token = _token;
+    if (token != null) unawaited(token.cancel());
+    super.dispose();
   }
 
   // ---- build -------------------------------------------------------------

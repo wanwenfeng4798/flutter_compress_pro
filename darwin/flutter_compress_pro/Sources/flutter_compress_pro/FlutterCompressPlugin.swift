@@ -1,9 +1,10 @@
-#if os(iOS)
-import Flutter
-#else
-import FlutterMacOS
-#endif
 import Foundation
+
+#if os(iOS)
+  import Flutter
+#else
+  import FlutterMacOS
+#endif
 
 /// Bridges Flutter <-> the native pieces: `CompressionEngine` (transcode),
 /// `MediaProbe`, `Thumbnailer`, `DownloadSaver`. Shared iOS / macOS (AVFoundation,
@@ -11,14 +12,16 @@ import Foundation
 public class FlutterCompressPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
   private let engine = CompressionEngine()
+  private var pendingOperations = 0
+  private var clearing = false
   private var eventSink: FlutterEventSink?
   private let workQueue = DispatchQueue(label: "flutter_compress_pro.work", qos: .userInitiated)
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     #if os(iOS)
-    let messenger = registrar.messenger()
+      let messenger = registrar.messenger()
     #else
-    let messenger = registrar.messenger
+      let messenger = registrar.messenger
     #endif
     let methodChannel = FlutterMethodChannel(
       name: "flutter_compress_pro/methods", binaryMessenger: messenger)
@@ -83,12 +86,21 @@ public class FlutterCompressPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             message: "compress: missing id/path/config", details: nil))
         return
       }
-      let outputDir = args["outputDir"] as? String, outputName = args["outputName"] as? String
+      let outputDir = args["outputDir"] as? String
+      let outputName = args["outputName"] as? String
+      guard !clearing else {
+        result(
+          FlutterError(
+            code: ErrorCode.badArguments, message: "Cache cleanup is in progress", details: nil))
+        return
+      }
+      pendingOperations += 1
       workQueue.async {
         self.engine.compress(
           id: id, path: path, config: config, outputDir: outputDir, outputName: outputName
         ) { outcome in
           DispatchQueue.main.async {
+            self.pendingOperations -= 1
             switch outcome {
             case .success(let map): result(map)
             case .cancelled:
@@ -119,8 +131,20 @@ public class FlutterCompressPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
       }
 
     case "clearCache":
-      PluginFiles.clearCache()
-      result(nil)
+      guard pendingOperations == 0, !clearing else {
+        result(
+          FlutterError(
+            code: ErrorCode.badArguments, message: "Operations are pending", details: nil))
+        return
+      }
+      clearing = true
+      workQueue.async {
+        PluginFiles.clearCache()
+        DispatchQueue.main.async {
+          self.clearing = false
+          result(nil)
+        }
+      }
 
     case "saveToDownloads":
       dispatch(result, ErrorCode.saveFailed) {
@@ -135,8 +159,12 @@ public class FlutterCompressPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         guard let data = args["bytes"] as? FlutterStandardTypedData else {
           throw Self.badArg("bytes")
         }
-        return try ImageEngine.compressBytes(
+        var payload = try ImageEngine.compressBytes(
           data: data.data, config: ImageConfig(map: try map("config")))
+        if let bytes = payload["bytes"] as? Data {
+          payload["bytes"] = FlutterStandardTypedData(bytes: bytes)
+        }
+        return payload
       }
 
     case "compressImage":
@@ -156,15 +184,26 @@ public class FlutterCompressPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
   private func dispatch(
     _ result: @escaping FlutterResult, _ errorCode: String, _ block: @escaping () throws -> Any?
   ) {
+    guard !clearing else {
+      result(
+        FlutterError(
+          code: ErrorCode.badArguments, message: "Cache cleanup is in progress", details: nil))
+      return
+    }
+    pendingOperations += 1
     workQueue.async {
       let outcome: Result<Any?, Error>
       do { outcome = .success(try block()) } catch { outcome = .failure(error) }
       DispatchQueue.main.async {
+        self.pendingOperations -= 1
         switch outcome {
         case .success(let value):
           result(value)
         case .failure(let error):
-          result(FlutterError(code: errorCode, message: error.localizedDescription, details: nil))
+          result(
+            FlutterError(
+              code: error is ConfigError ? ErrorCode.badArguments : errorCode,
+              message: error.localizedDescription, details: nil))
         }
       }
     }

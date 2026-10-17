@@ -13,6 +13,15 @@ data class ImageConfig(
     val keepOriginalIfLarger: Boolean,
     val minSavingsPercent: Int,
 ) {
+    fun validate() {
+        if (quality !in 1..100 || minSavingsPercent !in 0..99 ||
+            listOf(targetSizeKB, maxWidth, maxHeight).any { it != null && it <= 0 } ||
+            format?.let { it !in listOf("jpeg", "png", "webp", "heic") } == true
+        ) {
+            throw BadArgumentException("Invalid image configuration")
+        }
+    }
+
     companion object {
         fun fromMap(m: Map<String, Any?>) = ImageConfig(
             format = m["format"] as? String,
@@ -24,6 +33,6 @@ data class ImageConfig(
             lossless = m["lossless"] as? Boolean ?: false,
             keepOriginalIfLarger = m["keepOriginalIfLarger"] as? Boolean ?: true,
             minSavingsPercent = (m["minSavingsPercent"] as? Number)?.toInt() ?: 0,
-        )
+        ).also { it.validate() }
     }
 }

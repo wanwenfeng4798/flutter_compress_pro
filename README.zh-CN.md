@@ -80,7 +80,7 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 
 ¹ Web 仅在浏览器支持 WebCodecs 的 HEVC 编码时用 H.265(如 Safari、带硬件 HEVC 的 Chrome),否则自动回退 H.264。Windows / Linux 在有 `libx265` 时编码 HEVC(自动下载包含此编码器),失败则回退 `libx264`。
 
-² 只有 iOS、macOS、Windows、Linux 能真正抽帧。Media3 没有抽帧效果,Web 管线对每一个解码帧都重新编码 —— Android / Web 上 `frameRate` 只影响码率/关键帧计算。实际帧率请读 `result.frameRate`。
+² 只有 iOS、macOS、Windows、Linux 能真正抽帧。Media3 没有抽帧效果,Web 管线对每一个解码帧都重新编码 —— Android / Web 忽略 `frameRate`。实际帧率请读 `result.frameRate`。
 
 ³ Media3 不暴露任何音频编码器设置,Android 使用其默认 AAC 码率。该值仍参与
 `targetSizeMB` 的预算计算。
@@ -115,7 +115,7 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.2.0
+  flutter_compress_pro: ^0.2.1
 ```
 
 ## 配合 AI 助手接入
@@ -424,3 +424,20 @@ App 声明更高版本的 Media3 依然会生效 —— 但插件不会自己悄
 ## 许可证
 
 MIT —— 见 [LICENSE](LICENSE)。
+
+### 任务与输出安全
+
+通过 `FlutterCompress.instance` 并发提交的视频会按顺序排队；取消排队任务的 token
+可阻止其启动。有操作尚未完成时，`clearCache` 会返回错误。下载或上传完成后再释放
+Web 输出 URL。原生输出采用独立预留路径，保留已有文件；Android 和 Apple 会在指定
+输出目录内建立任务子目录。保存到源文件自身会直接返回原路径，不会删除源文件。
+
+Release 构建也执行配置校验。极小尺寸上限不会放大源画面，`DimensionAlignment.none`
+保留精确尺寸；若编码器不支持该尺寸，会返回编码错误。图片目标体积包含元数据；
+格式无法达到目标时会明确报错。Web 视频仍丢弃音频且忽略裁剪和帧率上限，预算使用
+完整时长，结果按实际时间戳计算。桌面能力检查只检测本地或已缓存的 FFmpeg；
+自动下载固定到具体构建，并校验 SHA-256。
+
+回归命令：`flutter test`、`node tool/web_engine_test.cjs`，以及 macOS 上的
+`bash tool/run_darwin_checks.sh`。仓库已包含集成测试素材；
+`bash tool/generate_fixture.sh` 可重新生成，CI 也运行原生输出验证。

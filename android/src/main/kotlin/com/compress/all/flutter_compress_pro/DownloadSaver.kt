@@ -18,7 +18,7 @@ import java.io.File
 object DownloadSaver {
     fun save(context: Context, path: String, fileName: String?): String {
         val src = File(path)
-        val name = fileName ?: src.name
+        val name = (fileName ?: src.name).substringAfterLast('/').substringAfterLast('\\')
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             // Writing to the public Downloads folder directly needs the legacy
@@ -38,7 +38,19 @@ object DownloadSaver {
             @Suppress("DEPRECATION")
             val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             dir.mkdirs()
-            return src.copyTo(File(dir, name), overwrite = true).absolutePath
+            val target = File(dir, name)
+            if (target.canonicalFile == src.canonicalFile) return src.canonicalPath
+            for (index in 0..9999) {
+                val suffix = if (index == 0) "" else "-$index"
+                val ext = target.extension.let { if (it.isEmpty()) "" else ".$it" }
+                val candidate = File(dir, target.nameWithoutExtension + suffix + ext)
+                try {
+                    return src.copyTo(candidate, overwrite = false).absolutePath
+                } catch (_: FileAlreadyExistsException) {
+                    continue
+                }
+            }
+            error("Cannot reserve Downloads output")
         }
 
         val resolver = context.contentResolver

@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 
 /**
  * Boundary coverage for the Kotlin half of the three-way SizeMath port
- * (CLAUDE.md §12.2).
+ *.
  *
  * These cases intentionally mirror `test/size_math_test.dart` one for one: the
  * algorithm is duplicated across Kotlin, Swift and Dart, so the only way to
@@ -171,12 +171,12 @@ class SizeMathTest {
     }
 
     @Test
-    fun `alignment none still yields even dimensions`() {
+    fun `alignment none preserves exact odd dimensions`() {
         val (w, h) = SizeMath.targetDimensions(
-            1001, 667, config(maxWidth = 1000, alignment = "none"),
+            9, 7, config(maxWidth = 9, alignment = "none"),
         )
-        assertEquals(0, w % 2)
-        assertEquals(0, h % 2)
+        assertEquals(9, w)
+        assertEquals(7, h)
     }
 
     @Test
@@ -189,6 +189,11 @@ class SizeMathTest {
     fun `never returns a zero side for a tiny cap`() {
         val (w, h) = SizeMath.targetDimensions(1920, 1080, config(maxWidth = 8))
         assertTrue(w > 0 && h > 0, "got ${w}x$h")
+    }
+
+    @Test
+    fun `a tiny source never upscales to a macroblock`() {
+        assertEquals(4 to 4, SizeMath.targetDimensions(8, 8, config(maxWidth = 4)))
     }
 
     // ---- keepsOriginal (minSavingsPercent) ---------------------------------

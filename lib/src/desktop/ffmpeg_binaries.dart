@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ffi';
 import 'dart:io';
 
 import '../error_codes.dart';
@@ -26,28 +25,40 @@ abstract final class FfmpegBinaries {
       Platform.environment['FLUTTER_COMPRESS_PRO_FFPROBE'] ??
       'ffprobe';
 
-  static Future<void> ensureAvailable() {
-    return _ensureFuture ??= _ensureAvailableImpl();
+  static Future<void> ensureAvailable({bool allowDownload = true}) async {
+    if (!allowDownload) {
+      await _ensureAvailableImpl(allowDownload: false);
+      return;
+    }
+    final pending = _ensureFuture ??= _ensureAvailableImpl();
+    try {
+      await pending;
+    } catch (_) {
+      if (identical(_ensureFuture, pending)) _ensureFuture = null;
+      rethrow;
+    }
   }
 
-  static Future<void> _ensureAvailableImpl() async {
+  static Future<void> _ensureAvailableImpl({bool allowDownload = true}) async {
     try {
       final envFfmpeg = Platform.environment['FLUTTER_COMPRESS_PRO_FFMPEG'];
       final envFfprobe = Platform.environment['FLUTTER_COMPRESS_PRO_FFPROBE'];
-      if (envFfmpeg != null &&
-          envFfmpeg.isNotEmpty &&
-          envFfprobe != null &&
-          envFfprobe.isNotEmpty) {
-        await _verify(envFfmpeg, envFfprobe);
-        _resolvedFfmpeg = envFfmpeg;
-        _resolvedFfprobe = envFfprobe;
+      final candidateFfmpeg = envFfmpeg?.isNotEmpty == true
+          ? envFfmpeg!
+          : 'ffmpeg';
+      final candidateProbe = envFfprobe?.isNotEmpty == true
+          ? envFfprobe!
+          : 'ffprobe';
+      if (await _works(candidateFfmpeg) && await _works(candidateProbe)) {
+        _resolvedFfmpeg = candidateFfmpeg;
+        _resolvedFfprobe = candidateProbe;
         return;
       }
-
-      if (await _works('ffmpeg') && await _works('ffprobe')) {
-        _resolvedFfmpeg = 'ffmpeg';
-        _resolvedFfprobe = 'ffprobe';
-        return;
+      if (envFfmpeg?.isNotEmpty == true || envFfprobe?.isNotEmpty == true) {
+        throw VideoCompressException(
+          CompressErrorCode.unsupported,
+          'Configured FFmpeg or FFprobe is unavailable',
+        );
       }
 
       final cached = await FfmpegDownloader.cachedBinaries();
@@ -59,7 +70,9 @@ abstract final class FfmpegBinaries {
       }
 
       final noDownload =
-          Platform.environment['FLUTTER_COMPRESS_PRO_NO_FFMPEG_DOWNLOAD'] == '1';
+          !allowDownload ||
+          Platform.environment['FLUTTER_COMPRESS_PRO_NO_FFMPEG_DOWNLOAD'] ==
+              '1';
       if (noDownload) {
         throw VideoCompressException(
           CompressErrorCode.unsupported,
@@ -74,7 +87,6 @@ abstract final class FfmpegBinaries {
       _resolvedFfmpeg = downloaded.ffmpeg;
       _resolvedFfprobe = downloaded.ffprobe;
     } catch (e) {
-      _ensureFuture = null;
       if (e is CompressException) rethrow;
       throw VideoCompressException(
         CompressErrorCode.unsupported,
@@ -107,6 +119,3 @@ abstract final class FfmpegBinaries {
     }
   }
 }
-
-/// Host ABI for picking a download asset.
-Abi hostAbi() => Abi.current();

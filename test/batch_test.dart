@@ -1,4 +1,4 @@
-// Batch semantics against a fake platform (CLAUDE.md §8.1 "Dart 桥接测").
+// Batch semantics against a fake platform.
 //
 // The platform interface is abstract, so the whole facade can be exercised
 // without a device: ordering, cancellation, progress and per-item error

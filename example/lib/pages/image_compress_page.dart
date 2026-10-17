@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../models/demo_session.dart';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -26,7 +27,8 @@ class ImageCompressPage extends StatefulWidget {
   State<ImageCompressPage> createState() => _ImageCompressPageState();
 }
 
-class _ImageCompressPageState extends State<ImageCompressPage> {
+class _ImageCompressPageState extends State<ImageCompressPage>
+    with DemoSession<ImageCompressPage> {
   final _compressor = FlutterCompress.instance;
 
   String? _inputPath;
@@ -43,7 +45,7 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
   bool _busy = false;
 
   bool get _isAndroid => !kIsWeb && Platform.isAndroid;
-  void _appendLog(String line) => setState(() => _log = '$line\n$_log');
+  void _appendLog(String line) => setState(() => _log = prependLog(_log, line));
 
   /// "Visually lossless" high-quality preset — high enough to be visually
   /// indistinguishable, low enough to still shrink typical JPEGs.
@@ -63,7 +65,9 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
 
   Future<void> _pick() async {
     final l10n = AppLocalizations.of(context);
+    final revision = ++inputRevision;
     final file = await FilePicker.pickFile(type: FileType.image);
+    if (!mounted || revision != inputRevision) return;
     final path = file?.xFile.path;
     if (path == null || path.isEmpty) return;
     setState(() {
@@ -72,6 +76,7 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
     });
     try {
       final info = await _compressor.getImageInfo(path);
+      if (!mounted || revision != inputRevision) return;
       final srcKB = (info.sizeBytes / 1024).ceil();
       setState(() {
         _info = info;
@@ -85,7 +90,7 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
   Future<void> _pickOutputDir() async {
     final l10n = AppLocalizations.of(context);
     final dir = await FilePicker.getDirectoryPath();
-    if (dir != null) {
+    if (mounted && dir != null) {
       setState(() => _outputDir = dir);
       _appendLog(l10n.logOutputDir(dir));
     }
@@ -120,6 +125,8 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
         _config(),
         outputDirectory: routeToDownloads ? null : _outputDir,
       );
+      await ownOutput(r.outputPath, skipped: r.skipped);
+      if (!mounted) return;
       if (r.skipped) {
         _appendLog(l10n.logSkipped);
         return;
@@ -134,7 +141,7 @@ class _ImageCompressPageState extends State<ImageCompressPage> {
             .replaceFirst('MB', 'KB'),
       );
       if (routeToDownloads) {
-        final saved = await _compressor.saveToDownloads(
+        final saved = await saveOutput(
           r.outputPath,
           // Use the format actually written (lossless may fall back to PNG),
           // so the extension — and thus the saved MIME type — is correct.

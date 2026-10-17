@@ -87,7 +87,7 @@ Linux use `libx265` when present (auto-download includes it) and fall back to
 
 ² Only iOS, macOS, Windows and Linux decimate frames. Media3 has no frame-dropping
 effect, and the web pipeline re-encodes every decoded frame — on Android/Web,
-`frameRate` only influences the bitrate/keyframe maths. Read `result.frameRate`
+`frameRate` is ignored on Android and Web. Read `result.frameRate`
 for what was actually written.
 
 ³ Media3 exposes no audio-encoder settings, so Android encodes AAC at its own
@@ -129,7 +129,7 @@ JPEG is reliable; other formats depend on the muxer.
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.2.0
+  flutter_compress_pro: ^0.2.1
 ```
 
 ## Integrate with an AI assistant
@@ -505,3 +505,24 @@ add user-selected file access to both Debug and Release entitlements, or you get
 
 MIT — see [LICENSE](LICENSE). Auto-downloaded FFmpeg on Windows/Linux is **GPL**
 (third-party); see [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds).
+
+### Task and output safety
+
+Concurrent video calls through `FlutterCompress.instance` are queued in arrival order.
+Cancelling a queued token prevents that job from starting. Cache cleanup rejects while
+operations are pending; release output URLs after the download or upload completes.
+Native output files are reserved uniquely: an existing file is preserved and a distinct
+path is returned. Android and Apple outputs use a per-job directory inside the chosen
+output directory. Saving onto the source itself returns its path without deleting it.
+
+Configuration is validated in release builds as well as debug builds. Tiny dimension
+caps never enlarge a source, and `DimensionAlignment.none` keeps exact dimensions; an
+encoder can reject dimensions it cannot encode. A target image size either fits (including
+metadata) or raises an error when the format cannot meet it. Web video still drops audio
+and ignores trim/frame-rate caps; its budget uses the full duration and its result reports
+actual timestamps. Desktop support detection checks installed/cached FFmpeg without
+automatically downloading it. Auto-download uses a pinned build with SHA-256 checks.
+
+For regressions, run `flutter test`, `node tool/web_engine_test.cjs`, and on macOS
+`bash tool/run_darwin_checks.sh`. The repository includes the integration fixture;
+`bash tool/generate_fixture.sh` regenerates it. Native output checks also run in CI.

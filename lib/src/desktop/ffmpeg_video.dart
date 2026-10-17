@@ -6,6 +6,7 @@ import '../error_codes.dart';
 import '../exceptions.dart';
 import '../models.dart';
 import 'ffmpeg_binaries.dart';
+import 'plugin_cache.dart';
 
 /// Result of an FFmpeg video encode attempt.
 class FfmpegCompressResult {
@@ -91,11 +92,11 @@ abstract final class FfmpegVideo {
       frameRate: fps,
       codec: codec,
       rotation: rotation,
+      hasAudio: streams.any((s) => (s as Map)['codec_type'] == 'audio'),
     );
   }
 
   static Future<FfmpegCompressResult> compress({
-    required String id,
     required String inputPath,
     required String outputPath,
     required VideoCompressConfig config,
@@ -173,7 +174,7 @@ abstract final class FfmpegVideo {
     ];
     final trim = config.trim;
     if (trim != null) {
-      args.addAll(['-ss', _sec(trim.startMs), '-to', _sec(trim.endMs)]);
+      args.addAll(['-ss', _sec(trim.startMs), '-t', _sec(durationMs)]);
     }
     args.addAll(['-i', inputPath]);
 
@@ -184,7 +185,10 @@ abstract final class FfmpegVideo {
       filters.add('scale=$targetWidth:$targetHeight');
     }
     if (config.frameRate != null) {
-      filters.add('fps=${config.frameRate}');
+      final fps = info.frameRate == null
+          ? config.frameRate!
+          : config.frameRate!.clamp(0.001, info.frameRate!);
+      filters.add('fps=$fps');
     }
     if (filters.isNotEmpty) {
       args.addAll(['-vf', filters.join(',')]);
@@ -215,12 +219,13 @@ abstract final class FfmpegVideo {
 
     final process = await Process.start(FfmpegBinaries.ffmpeg, args);
     onProcess(process);
+    if (isCancelled()) process.kill(ProcessSignal.sigkill);
 
     var stderrBuf = '';
-    final progressSub = process.stdout
+    final progressDone = process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((line) {
+        .forEach((line) {
           if (line.startsWith('out_time_ms=')) {
             final us = int.tryParse(line.substring('out_time_ms='.length));
             if (us != null && durationMs > 0) {
@@ -232,7 +237,7 @@ abstract final class FfmpegVideo {
           }
         });
 
-    process.stderr.transform(utf8.decoder).listen((chunk) {
+    final stderrDone = process.stderr.transform(utf8.decoder).forEach((chunk) {
       stderrBuf += chunk;
       if (stderrBuf.length > 8000) {
         stderrBuf = stderrBuf.substring(stderrBuf.length - 4000);
@@ -240,9 +245,9 @@ abstract final class FfmpegVideo {
     });
 
     final exitCode = await process.exitCode;
-    await progressSub.cancel();
+    await Future.wait([progressDone, stderrDone]);
 
-    if (isCancelled() || exitCode < 0) {
+    if (isCancelled()) {
       try {
         await File(outputPath).delete();
       } catch (_) {}
@@ -281,10 +286,7 @@ abstract final class FfmpegVideo {
     required Directory outDir,
   }) async {
     await FfmpegBinaries.ensureAvailable();
-    final out = File(
-      '${outDir.path}${Platform.pathSeparator}'
-      'thumb_${DateTime.now().millisecondsSinceEpoch}.jpg',
-    );
+    final out = PluginCache.reserve(outDir, 'thumb.jpg');
     final q = (31 - (quality.clamp(1, 100) / 100.0 * 30)).round().clamp(2, 31);
     final args = <String>[
       '-y',
@@ -301,14 +303,23 @@ abstract final class FfmpegVideo {
       args.addAll(['-vf', 'scale=$maxWidth:-2']);
     }
     args.add(out.path);
-    final result = await Process.run(FfmpegBinaries.ffmpeg, args);
-    if (result.exitCode != 0 || !await out.exists()) {
-      throw VideoCompressException(
-        CompressErrorCode.thumbnailFailed,
-        'ffmpeg thumbnail failed: ${result.stderr}',
-      );
+    try {
+      final result = await Process.run(FfmpegBinaries.ffmpeg, args);
+      if (result.exitCode != 0 ||
+          !await out.exists() ||
+          await out.length() == 0) {
+        throw VideoCompressException(
+          CompressErrorCode.thumbnailFailed,
+          'ffmpeg thumbnail failed: ${result.stderr}',
+        );
+      }
+      return out.path;
+    } catch (_) {
+      if (await out.exists()) await out.delete();
+      rethrow;
+    } finally {
+      PluginCache.release(out);
     }
-    return out.path;
   }
 
   static double? _parseFps(dynamic raw) {

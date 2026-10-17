@@ -84,8 +84,9 @@ object SizeMath {
     private fun align(w: Int, h: Int, alignment: String): Pair<Int, Int> {
         // Encoders require even dimensions; auto16 uses /16 to avoid macroblock
         // padding artifacts. Always round *down* so alignment can never upscale.
-        val m = if (alignment == "auto16") 16 else 2
-        fun down(v: Int): Int = (v / m * m).coerceAtLeast(m)
+        if (alignment == "none") return w.coerceAtLeast(1) to h.coerceAtLeast(1)
+        val m = 16
+        fun down(v: Int): Int = if (v < m) v.coerceAtLeast(1) else v / m * m
         return down(w) to down(h)
     }
 
@@ -93,7 +94,7 @@ object SizeMath {
      * Whether the source should be handed back untouched.
      *
      * Integer arithmetic on purpose: the same expression runs in Kotlin, Swift
-     * and JS (CLAUDE.md §12.2), and float division would let the three drift at
+     * and JS, and float division would let the three drift at
      * the boundary. `minSavingsPercent = 0` reproduces the original "only when
      * the output is larger or equal" rule exactly.
      */

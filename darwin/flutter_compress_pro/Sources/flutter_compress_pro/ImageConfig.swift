@@ -13,6 +13,13 @@ struct ImageConfig {
   let keepOriginalIfLarger: Bool
   let minSavingsPercent: Int
 
+  func validate() throws {
+    guard (1...100).contains(quality), (0...99).contains(minSavingsPercent),
+      ![targetSizeKB, maxWidth, maxHeight].compactMap({ $0 }).contains(where: { $0 <= 0 }),
+      format.map({ ["jpeg", "png", "webp", "heic"].contains($0) }) ?? true
+    else { throw ConfigError.invalid }
+  }
+
   init(map: [String: Any]) {
     format = map["format"] as? String
     quality = (map["quality"] as? NSNumber)?.intValue ?? 85

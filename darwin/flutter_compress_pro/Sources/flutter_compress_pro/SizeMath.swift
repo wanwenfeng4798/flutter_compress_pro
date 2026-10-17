@@ -5,7 +5,7 @@ import Foundation
 /// the Android `SizeMath` so both platforms hit the same target sizes.
 ///
 /// The short names below (`w`, `h`, `s`, `m`, `v`) match the Kotlin and Dart
-/// ports line for line — CLAUDE.md §12.2 makes this file one algorithm kept in
+/// ports line for line — the shared algorithm contract makes this file one algorithm kept in
 /// three languages, and diffing the copies against each other is the only
 /// practical way to catch drift. Renaming one platform's copy would cost more
 /// than the terse names do.
@@ -83,7 +83,7 @@ enum SizeMath {
   /// Whether the source should be handed back untouched.
   ///
   /// Integer arithmetic on purpose: the same expression runs in Kotlin, Swift
-  /// and JS (CLAUDE.md §12.2), and float division would let the three drift at
+  /// and JS, and float division would let the three drift at
   /// the boundary. `minSavingsPercent = 0` reproduces the original "only when
   /// the output is larger or equal" rule exactly.
   static func keepsOriginal(
@@ -97,8 +97,9 @@ enum SizeMath {
 
   private static func align(_ w: Int, _ h: Int, _ alignment: String) -> (Int, Int) {
     // Always round *down* so alignment can never upscale.
-    let m = alignment == "auto16" ? 16 : 2
-    func down(_ v: Int) -> Int { max(v / m * m, m) }
+    if alignment == "none" { return (max(1, w), max(1, h)) }
+    let m = 16
+    func down(_ v: Int) -> Int { v < m ? max(v, 1) : v / m * m }
     return (down(w), down(h))
   }
 }

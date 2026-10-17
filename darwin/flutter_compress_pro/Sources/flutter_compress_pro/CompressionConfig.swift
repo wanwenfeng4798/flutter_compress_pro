@@ -20,6 +20,18 @@ struct CompressionConfig {
   /// "auto" (keep source container where possible) or "mp4".
   let container: String
 
+  func validate() throws {
+    let positive = [targetSizeMB, videoBitrateKbps, audioBitrateKbps, maxWidth, maxHeight]
+    guard !positive.compactMap({ $0 }).contains(where: { $0 <= 0 }),
+      frameRate.map({ $0.isFinite && $0 > 0 }) ?? true,
+      qualityPercent.map({ (1...100).contains($0) }) ?? true,
+      (0...99).contains(minSavingsPercent),
+      trimStartMs.map({ start in start >= 0 && (trimEndMs.map({ $0 > start }) ?? false) }) ?? true
+    else {
+      throw ConfigError.invalid
+    }
+  }
+
   init(map: [String: Any]) {
     quality = map["quality"] as? String ?? "medium"
     qualityPercent = (map["qualityPercent"] as? NSNumber)?.intValue
@@ -46,4 +58,9 @@ enum CompressionOutcome {
   case success([String: Any])
   case cancelled
   case failure(String)
+}
+
+enum ConfigError: LocalizedError {
+  case invalid
+  var errorDescription: String? { "Invalid compression configuration" }
 }

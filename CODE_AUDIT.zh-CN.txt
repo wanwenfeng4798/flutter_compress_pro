@@ -1,0 +1,156 @@
+flutter_compress_pro 依赖升级与修复记录
+日期：2026-10-16
+
+结果
+初次审查的 01–22 与 R1–R6 已落实修复或相应清理。
+本文件为当前修复记录，取代上一版“待选”清单；无需再次选择。
+代码未提交、未推送，也未执行实际发布。
+
+依赖更新
+- shared_preferences 2.5.6、material_ui 1.7.0，示例锁文件已刷新。
+- Kotlin 2.4.21、Gradle 9.8.1、Android NDK r30 30.0.16248370。
+- CI Flutter 3.47.7；checkout 7.0.1、setup-java 6.1.0、upload-artifact 7.0.2、flutter-action 2.23.0。
+- MP4Box 2.4.1，补齐浏览器全局接口和 createFile(true) 必需适配。
+- mp4-muxer 已是 5.2.2；原始许可证和版本说明随资产打包，误标的 MPL-2.0 已按发布包更正为 MIT。
+- 新增 crypto 3.0.7，用于 FFmpeg 下载/缓存完整性校验。
+- 示例补齐 cupertino_icons 2.0.0，消除缺失字体资源警告。
+- Media3、core-ktx、coroutines、Mockito、JUnit、ktlint 及其余 Dart 直接依赖保持已核实的最新稳定版本。
+- material_color_utilities、test_api、cross_file 仍受 Flutter SDK 或上游约束，未使用 dependency_overrides 强行替换。
+
+逐项修复
+
+01 Apple 图片字节通道
+FlutterCompressPlugin 在桥接层把 Data 包装成 FlutterStandardTypedData；图片引擎继续独立于 Flutter。
+
+02 并发任务状态
+公共视频调用按进入顺序排队，排队 token 可取消；后端入口增加占用保护。
+CancellationToken 不能在有未完成任务时 reset，避免丢失取消绑定。
+
+03 保存源文件自身
+相同文件身份直接返回已有路径；先复制到临时文件再移动，已有目的文件采用新名字保留，不先删除。
+Android 旧版 Downloads 分支同样保留现有文件。
+
+04 输出路径与覆盖
+桌面采用独占文件创建，碰撞时递增后缀；Android/Apple 使用独立任务子目录。
+符号链接、../、已有 -1 文件均不会使输出覆盖源文件。
+
+05 Apple 缩放
+视频 composition 明确组合源旋转、原点平移和目标缩放。
+真实原生回归已检查横屏与旋转源的四角颜色，输出尺寸正确且画面未被裁掉。
+
+06 Apple 失败/回退
+增加 HEVC 失败后的 H.264 重试、append 返回值检查与状态监测。
+视频/音频泵使用幂等完成句柄，取消和写入失败都能完成 Future，并清理输出及编解码状态。
+后台执行额度移入独立辅助类；管线构造和估算已拆分，保持原生 lint 通过。
+
+07 Web 取消
+Dart 跟踪脚本加载、元数据读取和编码阶段的取消状态。
+元数据 fetch 与视频 fetch 绑定 AbortController；取消不再在编码开始时被抹掉。
+脚本加载、元数据解析和缩略图等待有超时，防止永久等待。
+
+08 Web 失败清理
+整个编码生命周期受最外层 finally 保护，包含 fetch、配置和解码器创建前后的失败。
+编码器、解码器、活动 id 和取消状态均有对应清理；失败后可重试。
+
+09 Web 时长/帧率
+结果由实际编码帧时间戳跨度计算，不再用请求 fps 除帧数。
+真实浏览器输入 4 秒/24fps，输出探测与报告均为 4 秒，报告帧率约 24fps。
+
+10 Web 内存与背压
+元数据读取的源 buffer 可由紧接的编码复用；保留缓存数量有界并设过期时间。
+解复用每批 8 个样本，限制解码/编码队列，消费后释放样本数据。
+不会在每批之间 flush 解码器，避免 WebCodecs 刷新后的关键帧要求破坏后续解码。
+
+11 桌面图片目标体积
+JPEG、PNG、WebP 共用目标搜索和尺寸降级；保存最佳候选，不再用最后一轮覆盖结果。
+先解码/限制源尺寸，再做质量搜索；目标不可满足时明确报错，临时目录在 finally 清理。
+真实 FFmpeg 测试覆盖文件与内存两条入口，三种格式均达到 5KB 上限。
+
+12 真实元信息
+桌面编码后重新探测输出，帧率上限不再提升低帧率源；hasAudio 取真实音轨。
+Android/Apple skipped 返回源文件时，时长、编码、帧率、音轨也使用源元信息。
+裁剪结束超过全长时按有效全长处理。
+
+13 Release 校验
+Dart 与原生入口增加运行时配置验证，覆盖正数范围、有限帧率、裁剪与百分比。
+非法裁剪起点在媒体范围外会报错；Apple 还拒绝非有限/无效媒体尺寸与时长。
+
+14 极小尺寸与 none
+三端数学实现不再把极小源扩大到 16 像素；none 保留精确整数尺寸。
+不支持奇数或极小尺寸的具体编码器仍可返回明确编码错误，不静默放大源画面。
+
+15 缓存维护
+公共入口及两端原生桥接拒绝在操作尚未完成时清缓存，并保护独占输出。
+Apple 缓存遍历/删除移至工作队列，避免主线程大文件 IO。
+
+16 Android 主线程工作
+视频探测和输出目录准备移至 IO 调度器，仅保留 Transformer 所需的 Looper 交互。
+
+17 Android 图片最终结果
+检查 Bitmap.compress 成功标志和非空输出；附加 EXIF 后重新检查最终大小与保留原图阈值。
+不能在目标内保留元数据时明确报错，并删除不完整输出。
+
+18 示例生命周期
+公共 DemoSession 统一挂载状态、有限长度日志、输出所有权与保存/释放。
+文件选择、探测和估算增加请求版本检查，旧请求不能覆盖新输入；视频页面销毁会取消 token。
+Web 下载 helper 给浏览器消费 URL 的时间，示例在保存后释放自产 Blob。
+
+19 FFmpeg 下载
+固定 autobuild-2026-10-16-13-04 / N-127579-g5cb9fcd211，四种平台归档摘要固定。
+SHA-256 校验归档，安装清单校验缓存二进制；ABI 隔离缓存，跨进程锁保护安装。
+下载和解包进入临时目录，完成后移动安装目录；失败清理临时文件。
+Windows 的 tar 缺失也能进入 PowerShell 回退，路径通过环境变量传递而非拼进命令。
+能力检测不触发下载；环境变量覆盖可分别指定 FFmpeg/FFprobe。
+
+20 回归与 CI
+已提供仓库视频 fixture、确定性生成工具，以及真实媒体测试。
+关键视频测试禁用 skipped，补充最终进度、PNG 目标字节数断言。
+CI 增加 FFmpeg 实际媒体测试、Linux 输出集成验证、Apple 核心原生回归、真实 Chrome 和 Wasm 构建。
+
+21 Wasm
+条件导出改为 dart.library.js_interop，避免把桌面 dart:ffi 引入 Wasm。
+完整 flutter build web --wasm 已通过。
+
+22 能力与文档
+桌面能力检查验证已安装/缓存工具；Web 能力检查实际询问 H.264 编码配置。
+中英文说明和代码注释同步排队、路径冲突、缓存、目标体积和各平台限制。
+Web 的音频丢弃、忽略 trim/fps 上限是现有已文档化限制；体积预算使用完整时长。
+
+冗余清理
+R1 删除无调用的 hostAbi() 和未使用的 FFmpeg 视频 id 参数。
+R2 复用 Web 源 buffer；桌面图片先准备中间解码结果，减少重复源解码；保留有缓存且有意义的可用性检查。
+R3 Dart 共用 keepsOriginal 与有效裁剪时长计算；三端尺寸语义保持一致并有边界回归。
+R4 示例共用日志、生命周期和输出保存/释放；保留视频/图片各自的展示和配置。
+R5 清理失效 CLAUDE.md 引用和过期参数注释；删除被跟踪的构建报告并加入忽略规则。
+   本地原生工具缓存和审查记录从 pub 发布包排除；保留示例所声明的视频素材，确保发布包中的示例可直接构建。ARB 生成文件按原发布方式保留。
+R6 已统一 Dart 格式，SwiftLint/ktlint 严格检查均无违规。
+
+已完成验证
+- pub publish --dry-run 已生成并检查压缩包；仅提示未提交改动，以及待提交删除的旧构建报告仍在 Git 索引中。未实际发布。
+- Dart 分析：flutter analyze --fatal-infos，无问题。
+- 完整 Dart 测试：82 项全部通过，其中包含 2 项真实 FFmpeg 媒体回归。
+- Kotlin 原生单元测试：30 项全部通过。
+- SwiftLint、ktlint、Dart 格式、仓库 guards 和 git diff --check 通过。
+- Android APK 构建通过。
+- 普通 Web 和完整 WebAssembly 构建均通过，缺失 Cupertino 字体警告已消除。
+- Web 依赖封装/解析测试、Web 引擎模拟回归通过。
+- 真实 Chrome WebCodecs 编码和输出探测通过。
+- Apple 原生核心真实编码、重新解码、横屏/旋转源四角缩放、时长与取消回归通过。
+
+验证边界
+本机完整 macOS Flutter 构建仍停留在 MacOS SDK 下载阶段，无后续进度，重试已停止。
+因此尚未确认完整 Apple Flutter 桥接构建、iOS 真机、Windows/Linux 桌面应用运行及远端 GitHub Actions。
+这些环境限制不等于核心原生回归未执行；Apple 核心与 FFmpeg/Web 都已实际处理媒体验证。
+上游 AVFoundation/AGP 的弃用警告仍存在，兼容现有最低系统版本的代码仍可编译；未在本轮抬高最低系统版本。
+
+常用验证命令
+flutter analyze --fatal-infos
+flutter test
+FCP_RUN_MEDIA_TESTS=1 flutter test test/desktop_media_test.dart
+node tool/web_dependency_smoke_test.cjs
+node tool/web_engine_test.cjs
+node tool/run_browser_regression.cjs
+bash tool/run_darwin_checks.sh
+bash tool/guards.sh
+
+版本信息来源为 pub.dev、npm、Google Maven、Maven Central、Gradle 官方版本服务与上游 GitHub 发布元数据。

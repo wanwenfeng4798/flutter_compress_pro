@@ -13,7 +13,7 @@ concurrency:
 
 env:
   # Keep in step with pubspec.yaml's `flutter:` constraint.
-  FLUTTER_VERSION: 3.47.2
+  FLUTTER_VERSION: 3.47.7
 
 jobs:
   # Fast feedback: format, analyze, test. Ordered cheapest-first.
@@ -21,8 +21,8 @@ jobs:
     name: format / analyze / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -39,32 +39,32 @@ jobs:
       - name: Test
         run: flutter test --coverage
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: coverage
           path: coverage/lcov.info
           if-no-files-found: ignore
 
-  # The CLAUDE.md checks that are cheap enough to run on every push. Each one
+  # The repository checks that are cheap enough to run on every push. Each one
   # corresponds to a bug that previously reached master.
   guards:
     name: spec guards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - run: ./tool/guards.sh
 
   android:
     name: android build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: temurin
           java-version: '17'
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -92,8 +92,8 @@ jobs:
     name: linux build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -101,21 +101,28 @@ jobs:
       - name: Install FFmpeg + Linux build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg clang cmake ninja-build pkg-config libgtk-3-dev
+          sudo apt-get install -y xvfb ffmpeg clang cmake ninja-build pkg-config libgtk-3-dev
+      - name: FFmpeg media regressions
+        run: FCP_RUN_MEDIA_TESTS=1 flutter test test/desktop_media_test.dart
       - name: Build example (linux)
         working-directory: example
         run: flutter build linux --debug
+      - name: Validate real compression outputs
+        working-directory: example
+        run: xvfb-run -a flutter test integration_test/output_validation_test.dart -d linux
 
   macos-desktop:
     name: macos build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - name: Native Darwin regression
+        run: bash tool/run_darwin_checks.sh
       - name: Build example (macos)
         working-directory: example
         run: flutter build macos --debug
@@ -124,8 +131,8 @@ jobs:
     name: ios build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -149,21 +156,28 @@ jobs:
     name: web build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - name: Verify vendored MP4 libraries
+        run: |
+          node tool/web_dependency_smoke_test.cjs
+          node tool/web_engine_test.cjs
+          node tool/run_browser_regression.cjs
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - working-directory: example
         run: flutter build web
+      - working-directory: example
+        run: flutter build web --wasm
 
   publish-dry-run:
     name: pub publish --dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable

@@ -17,8 +17,11 @@ import 'src/models.dart';
 @JS('flutterCompressWeb.isSupported')
 external bool _jsIsSupported();
 
+@JS('flutterCompressWeb.canEncode')
+external JSPromise<JSBoolean> _jsCanEncode();
+
 @JS('flutterCompressWeb.getInfo')
-external JSPromise<JSObject> _jsGetInfo(String url);
+external JSPromise<JSObject> _jsGetInfo(String url, String? id);
 
 @JS('flutterCompressWeb.thumbnail')
 external JSPromise<JSString> _jsThumbnail(
@@ -85,7 +88,11 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
 
   final _progressCtrl = StreamController<CompressionProgress>.broadcast();
   Future<void>? _loaded;
-  bool _busy = false;
+  final Set<String> _jobs = {};
+  final Set<String> _cancelled = {};
+  void _checkCancelled(String id) {
+    if (_cancelled.contains(id)) throw VideoCompressCancelledException();
+  }
 
   @override
   Stream<CompressionProgress> get progressStream => _progressCtrl.stream;
@@ -154,7 +161,9 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     script.type = 'text/javascript';
     script.addEventListener(
       'load',
-      ((web.Event _) => completer.complete()).toJS,
+      ((web.Event _) {
+        if (!completer.isCompleted) completer.complete();
+      }).toJS,
     );
     script.addEventListener(
       'error',
@@ -166,18 +175,29 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
       )).toJS,
     );
     web.document.head!.appendChild(script);
-    return completer.future.catchError((Object e) {
-      // Let a retry re-attempt the fetch rather than replaying the failure.
-      _scripts.remove(src);
-      throw e;
-    });
+    return completer.future
+        .timeout(
+          const Duration(seconds: 30),
+          onTimeout: () {
+            script.remove();
+            throw VideoCompressException(
+              CompressErrorCode.unsupported,
+              'Script load timed out: $src',
+            );
+          },
+        )
+        .catchError((Object e) {
+          // Let a retry re-attempt the fetch rather than replaying the failure.
+          _scripts.remove(src);
+          throw e;
+        });
   });
 
   // ---- info / estimate ---------------------------------------------------
 
-  Future<Map<dynamic, dynamic>> _rawInfo(String url) async {
+  Future<Map<dynamic, dynamic>> _rawInfo(String url, {String? jobId}) async {
     await _ensureLoaded();
-    final obj = await _jsGetInfo(url).toDart;
+    final obj = await _jsGetInfo(url, jobId).toDart;
     return (obj.dartify() as Map).cast<dynamic, dynamic>();
   }
 
@@ -196,7 +216,8 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     final m = await _rawInfo(path);
     final srcW = (m['width'] as num).toInt();
     final srcH = (m['height'] as num).toInt();
-    final durationMs = _clampDuration((m['durationMs'] as num).toInt(), config);
+    config.validate();
+    final durationMs = (m['durationMs'] as num).toInt();
     final srcKbps = (m['bitrateKbps'] as num).toInt();
     final (tw, th) = SizeMath.targetDimensions(srcW, srcH, config);
     final videoBps = SizeMath.videoBitrateBps(
@@ -229,18 +250,16 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     // On the web there is no filesystem: the output is a blob: URL and the
     // download name is chosen at saveToDownloads time, so outputDir/outputName
     // don't apply here. Video is always mp4 (mp4-muxer).
-    await _ensureLoaded();
-    _busy = true;
+    config.validate();
+    _jobs.add(id);
     try {
-      final m = await _rawInfo(path);
+      await _ensureLoaded();
+      _checkCancelled(id);
+      final m = await _rawInfo(path, jobId: id);
+      _checkCancelled(id);
       final srcW = (m['width'] as num).toInt();
       final srcH = (m['height'] as num).toInt();
-      // Use the same duration `estimate` does, so the two agree. (Web doesn't
-      // apply the trim window yet, but the bitrate budget must still match.)
-      final durationMs = _clampDuration(
-        (m['durationMs'] as num).toInt(),
-        config,
-      );
+      final durationMs = (m['durationMs'] as num).toInt();
       final srcKbps = (m['bitrateKbps'] as num).toInt();
       final srcBytes = (m['sizeBytes'] as num).toInt();
       final (tw, th) = SizeMath.targetDimensions(srcW, srcH, config);
@@ -259,7 +278,7 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
                 'targetWidth': tw,
                 'targetHeight': th,
                 'videoBitrateBps': videoBps,
-                'frameRate': config.frameRate ?? 30,
+                'frameRate': (m['frameRate'] as num?)?.toDouble() ?? 30,
                 // Requested codec; the JS engine encodes HEVC when the browser supports
                 // it, otherwise falls back to H.264 (and reports which was used).
                 'codec': config.codec.name,
@@ -301,12 +320,13 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
       );
     } catch (e) {
       final msg = e.toString();
-      if (msg.contains('cancelled')) {
+      if (_cancelled.contains(id) || msg.contains('cancelled')) {
         throw VideoCompressCancelledException();
       }
       throw VideoCompressException('compress_failed', msg);
     } finally {
-      _busy = false;
+      _jobs.remove(id);
+      _cancelled.remove(id);
     }
   }
 
@@ -314,6 +334,11 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
   Future<void> cancel(String? id) async {
     // Nothing is loaded until the first compress, so a cancel before that has
     // nothing to target — and touching the JS namespace would throw.
+    if (id == null) {
+      _cancelled.addAll(_jobs);
+    } else if (_jobs.contains(id)) {
+      _cancelled.add(id);
+    }
     if (!_engineReady) return;
     if (id != null) {
       _jsCancel(id);
@@ -323,13 +348,13 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
   }
 
   @override
-  Future<bool> isCompressing() async => _busy;
+  Future<bool> isCompressing() async => _jobs.isNotEmpty;
 
   @override
   Future<bool> isSupported() async {
     try {
       await _ensureLoaded();
-      return true;
+      return (await _jsCanEncode().toDart).toDart;
     } catch (_) {
       return false;
     }
@@ -342,7 +367,7 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     required int quality,
     int? maxWidth,
   }) async {
-    await _ensureLoaded();
+    await _ensureImageLoaded();
     final res = await _jsThumbnail(
       path,
       positionMs,
@@ -400,6 +425,7 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
   ) async {
     // Web output is a blob: URL; outputDir/outputName don't apply. A null
     // config.format tells the JS engine to keep the source's format.
+    config.validate();
     await _ensureImageLoaded();
     try {
       final cfg = config.toMap().jsify()! as JSObject;
@@ -415,6 +441,7 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     Uint8List source,
     ImageCompressConfig config,
   ) async {
+    config.validate();
     await _ensureImageLoaded();
     try {
       final cfg = config.toMap().jsify()! as JSObject;
@@ -433,10 +460,5 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
         e.toString(),
       );
     }
-  }
-
-  int _clampDuration(int full, VideoCompressConfig c) {
-    final t = c.trim;
-    return t != null ? (t.endMs - t.startMs) : full;
   }
 }

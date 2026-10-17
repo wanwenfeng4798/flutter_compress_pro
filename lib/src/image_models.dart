@@ -1,4 +1,6 @@
 import 'dart:typed_data';
+import 'error_codes.dart';
+import 'exceptions.dart';
 
 // Image-compression models — deliberately separate from the video models so the
 // two APIs never blur together.
@@ -118,6 +120,21 @@ class ImageCompressConfig {
   /// because swapping files — and losing whatever metadata the re-encode drops —
   /// isn't worth 3%.
   final int minSavingsPercent;
+
+  void validate() {
+    if (quality < 1 ||
+        quality > 100 ||
+        (targetSizeKB != null && targetSizeKB! <= 0) ||
+        (maxWidth != null && maxWidth! <= 0) ||
+        (maxHeight != null && maxHeight! <= 0) ||
+        minSavingsPercent < 0 ||
+        minSavingsPercent >= 100) {
+      throw ImageCompressException(
+        CompressErrorCode.badArguments,
+        'Invalid image configuration',
+      );
+    }
+  }
 
   Map<String, dynamic> toMap() => {
     'format': format?.name,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The checks CLAUDE.md asks to be automated (see its closing section). Each one
+# The repository checks. Each one
 # exists because a real bug got through review without it.
 #
 # Run from the repo root: ./tool/guards.sh

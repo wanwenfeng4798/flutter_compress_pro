@@ -36,6 +36,8 @@ class FlutterCompressPlugin :
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var engine: CompressionEngine? = null
     private var imageEngine: ImageEngine? = null
+    private var pendingOperations = 0
+    private var clearing = false
     private var eventSink: EventChannel.EventSink? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -97,9 +99,18 @@ class FlutterCompressPlugin :
             }
 
             // Deleting a cache full of multi-hundred-MB transcodes is real IO.
-            "clearCache" -> dispatch(result, ErrorCode.SAVE_FAILED, Dispatchers.IO) {
-                context.clearCompressCache()
-                null
+            "clearCache" -> {
+                if (pendingOperations != 0 || clearing) {
+                    result.error(ErrorCode.BAD_ARGUMENTS, "Operations are pending", null)
+                } else {
+                    clearing = true
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { context.clearCompressCache() } }
+                            .onSuccess { result.success(null) }
+                            .onFailure { result.error(ErrorCode.SAVE_FAILED, it.message, null) }
+                        clearing = false
+                    }
+                }
             }
 
             "saveToDownloads" -> dispatch(result, ErrorCode.SAVE_FAILED, Dispatchers.IO) {
@@ -144,21 +155,31 @@ class FlutterCompressPlugin :
         ctx: CoroutineContext = Dispatchers.Default,
         block: suspend () -> Any?,
     ) {
+        if (clearing) {
+            result.error(ErrorCode.BAD_ARGUMENTS, "Cache cleanup is in progress", null)
+            return
+        }
+        pendingOperations++
         scope.launch {
-            runCatching { withContext(ctx) { block() } }
-                .onSuccess { result.success(it) }
-                .onFailure { e ->
-                    when (e) {
-                        is CompressionCancelledException ->
-                            result.error(ErrorCode.CANCELLED, e.message, null)
-                        is BadArgumentException ->
-                            result.error(ErrorCode.BAD_ARGUMENTS, e.message, null)
-                        is PermissionDeniedException ->
-                            result.error(ErrorCode.PERMISSION_DENIED, e.message, null)
-                        // Keep the native detail: it's the only clue to the origin.
-                        else -> result.error(errorCode, e.message, e.stackTraceToString())
+            try {
+                runCatching { withContext(ctx) { block() } }
+                    .onSuccess { result.success(it) }
+                    .onFailure { e ->
+                        when (e) {
+                            is CompressionCancelledException ->
+                                result.error(ErrorCode.CANCELLED, e.message, null)
+
+                            is BadArgumentException ->
+                                result.error(ErrorCode.BAD_ARGUMENTS, e.message, null)
+
+                            is PermissionDeniedException ->
+                                result.error(ErrorCode.PERMISSION_DENIED, e.message, null)
+
+                            // Keep the native detail: it's the only clue to the origin.
+                            else -> result.error(errorCode, e.message, e.stackTraceToString())
+                        }
                     }
-                }
+            } finally { pendingOperations-- }
         }
     }
 

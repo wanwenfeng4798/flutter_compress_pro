@@ -1,4 +1,4 @@
-// Output validation on a real device (CLAUDE.md §12.4).
+// Output validation on a real device.
 //
 // This is the layer that was missing when a muxer misconfiguration truncated
 // every video to 30 seconds: it compiled, unit tests passed, analysis was clean,
@@ -50,7 +50,7 @@ void main() {
     test('duration is preserved within 5%', () async {
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(targetSizeMB: 2),
+        const VideoCompressConfig(targetSizeMB: 1, keepOriginalIfLarger: false),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
@@ -69,7 +69,10 @@ void main() {
     test('the file on disk can be decoded again', () async {
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(quality: CompressQuality.low),
+        const VideoCompressConfig(
+          quality: CompressQuality.low,
+          keepOriginalIfLarger: false,
+        ),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
@@ -84,7 +87,10 @@ void main() {
     test('reported size matches the bytes actually written', () async {
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(quality: CompressQuality.medium),
+        const VideoCompressConfig(
+          quality: CompressQuality.medium,
+          keepOriginalIfLarger: false,
+        ),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
@@ -93,10 +99,14 @@ void main() {
     });
 
     test('a resolution cap is respected and never upscales', () async {
-      const cap = 640;
+      const cap = 320;
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(maxWidth: cap, maxHeight: cap),
+        const VideoCompressConfig(
+          maxWidth: cap,
+          maxHeight: cap,
+          keepOriginalIfLarger: false,
+        ),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
@@ -108,13 +118,16 @@ void main() {
     });
 
     test('a target size lands in the right ballpark', () async {
-      const targetMB = 2;
+      const targetMB = 1;
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(targetSizeMB: targetMB),
+        const VideoCompressConfig(
+          targetSizeMB: targetMB,
+          keepOriginalIfLarger: false,
+        ),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
-      if (result.skipped) return; // source was already smaller
+      expect(result.skipped, isFalse);
 
       final actualMB = result.compressedSizeBytes / 1024 / 1024;
       // Deliberately loose: hardware rate control varies by device. The point is
@@ -138,12 +151,16 @@ void main() {
       final seen = <double>[];
       final result = await api.compress(
         sourcePath,
-        const VideoCompressConfig(quality: CompressQuality.low),
+        const VideoCompressConfig(
+          quality: CompressQuality.low,
+          keepOriginalIfLarger: false,
+        ),
         onProgress: (p) => seen.add(p.progress),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
       expect(seen, isNotEmpty, reason: 'no progress events arrived');
+      expect(seen.last, 1);
       for (var i = 1; i < seen.length; i++) {
         expect(seen[i], greaterThanOrEqualTo(seen[i - 1]));
       }
@@ -175,11 +192,15 @@ void main() {
       final png = await _materializeSamplePng();
       final result = await api.compressImage(
         png,
-        const ImageCompressConfig(targetSizeKB: 40),
+        const ImageCompressConfig(
+          targetSizeKB: 40,
+          keepOriginalIfLarger: false,
+        ),
       );
       addTearDown(() => api.releaseOutput(result.outputPath));
 
       expect(result.format, 'png', reason: 'no format requested → keep source');
+      expect(result.compressedSizeBytes, lessThanOrEqualTo(40 * 1024));
       final reread = await api.getImageInfo(result.outputPath);
       expect(reread.width, greaterThan(0));
       expect(reread.height, greaterThan(0));
@@ -208,10 +229,7 @@ void main() {
 /// Copies the bundled sample video out of the asset bundle onto disk, where the
 /// native engines can open it by path.
 ///
-/// The fixture is **not** in the repo — a checked-in video would bloat the
-/// package. Drop a short clip (a few seconds, ideally >1080p so the resolution
-/// cap has something to do) at `example/assets/sample.mp4`, declare it under
-/// `flutter: assets:` in example/pubspec.yaml, and this suite runs.
+/// Generate the fixture with tool/generate_fixture.sh before running this suite.
 Future<String> _materializeSampleVideo() async {
   final dir = await getTemporaryDirectory();
   final file = File('${dir.path}/sample.mp4');

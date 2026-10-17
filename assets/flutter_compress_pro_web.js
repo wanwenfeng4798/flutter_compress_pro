@@ -20,10 +20,10 @@
 
   const cancelled = new Set();
   /** Ids of runs currently in flight, so `cancelAll` has something to target. */
-  const active = new Set();
-  NS.cancel = function (id) { if (id) cancelled.add(id); };
+  const active = new Map();
+  NS.cancel = function (id) { if (id && active.has(id)) { cancelled.add(id); active.get(id).abort(); } };
   /** Cancel every in-flight run (backs Dart's `cancel()` with no id). */
-  NS.cancelAll = function () { for (const id of active) cancelled.add(id); };
+  NS.cancelAll = function () { for (const id of active.keys()) NS.cancel(id); };
 
   /** Every output object URL we created, so `revokeAll` can free them. */
   const OUTPUT_URLS = new Set();
@@ -55,8 +55,21 @@
       typeof MP4Box !== 'undefined' && typeof Mp4Muxer !== 'undefined';
   };
 
-  async function fetchBuffer(url) {
-    const res = await fetch(url);
+  NS.canEncode = async function () {
+    if (!NS.isSupported()) return false;
+    for (const codec of ['avc1.42001e', 'avc1.4D0028', 'avc1.640028']) {
+      try {
+        if ((await VideoEncoder.isConfigSupported({codec, width: 16, height: 16,
+          bitrate: 100000, framerate: 30})).supported) return true;
+      } catch (_) {}
+    }
+    return false;
+  };
+
+  let prepared = null;
+  let preparedTimer = null;
+  async function fetchBuffer(url, signal) {
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error('fetch failed: ' + res.status);
     return await res.arrayBuffer();
   }
@@ -76,62 +89,75 @@
 
   // ---- info --------------------------------------------------------------
 
-  NS.getInfo = function (url) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const buf = await fetchBuffer(url);
-        const sizeBytes = buf.byteLength;
-        const file = MP4Box.createFile();
+  NS.getInfo = async function (url, id) {
+    const controller = new AbortController();
+    if (id) active.set(id, controller);
+    try {
+      const buf = await fetchBuffer(url, controller.signal);
+      if (id && cancelled.has(id)) throw new Error('cancelled');
+      const sizeBytes = buf.byteLength;
+      prepared = { url, buffer: buf };
+      clearTimeout(preparedTimer);
+      preparedTimer = setTimeout(() => { prepared = null; }, 30000);
+      const file = MP4Box.createFile();
+      let timeout;
+      const info = await new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('metadata timed out')), DEMUX_TIMEOUT_MS);
         file.onError = (e) => reject(new Error('mp4box: ' + e));
-        file.onReady = (info) => {
-          const v = info.videoTracks && info.videoTracks[0];
-          if (!v) { reject(new Error('no video track')); return; }
-          const durationMs = (info.duration / info.timescale) * 1000;
-          const durSec = Math.max(durationMs / 1000, 0.001);
-          const fps = v.nb_samples / Math.max(v.movie_duration / v.movie_timescale, 0.001);
-          resolve({
-            width: v.video ? v.video.width : v.track_width,
-            height: v.video ? v.video.height : v.track_height,
-            durationMs: Math.round(durationMs),
-            sizeBytes: sizeBytes,
-            bitrateKbps: Math.round((sizeBytes * 8) / durSec / 1000),
-            frameRate: isFinite(fps) ? fps : null,
-            codec: v.codec || null,
-            rotation: 0,
-          });
-        };
-        // mp4box needs a fileStart offset on the buffer itself; annotate the one
-        // we fetched rather than slicing a copy, which would double peak memory.
+        file.onReady = resolve;
         buf.fileStart = 0;
         file.appendBuffer(buf);
         file.flush();
-      } catch (e) { reject(e); }
-    });
+      }).finally(() => clearTimeout(timeout));
+      const video = info.videoTracks && info.videoTracks[0];
+      if (!video) throw new Error('no video track');
+      const durationMs = info.duration / info.timescale * 1000;
+      const fps = video.nb_samples / Math.max(video.movie_duration / video.movie_timescale, 0.001);
+      return {
+        width: video.video ? video.video.width : video.track_width,
+        height: video.video ? video.video.height : video.track_height,
+        durationMs: Math.round(durationMs), sizeBytes,
+        bitrateKbps: Math.round(sizeBytes * 8 / Math.max(durationMs / 1000, 0.001) / 1000),
+        frameRate: isFinite(fps) ? fps : null, codec: video.codec || null,
+        hasAudio: (info.audioTracks || []).length > 0, rotation: 0,
+      };
+    } catch (error) {
+      if (id && (cancelled.has(id) || error.name === 'AbortError')) throw new Error('cancelled');
+      throw error;
+    } finally {
+      if (id) { active.delete(id); cancelled.delete(id); }
+    }
   };
 
   // ---- thumbnail (simple <video> + canvas) -------------------------------
 
   NS.thumbnail = function (url, positionMs, quality, maxWidth) {
+    const video = document.createElement('video');
+    let timeout;
     return new Promise((resolve, reject) => {
-      const v = document.createElement('video');
-      v.muted = true;
-      v.preload = 'auto';
-      v.src = url;
-      v.onloadedmetadata = () => {
-        v.currentTime = Math.min((positionMs || 0) / 1000, (v.duration || 0.1) - 0.01);
+      timeout = setTimeout(() => reject(new Error('thumbnail timed out')), DEMUX_TIMEOUT_MS);
+      video.muted = true;
+      video.preload = 'auto';
+      video.onloadedmetadata = () => {
+        video.currentTime = Math.max(0, Math.min((positionMs || 0) / 1000, (video.duration || 0.1) - 0.01));
       };
-      v.onseeked = () => {
+      video.onseeked = () => {
         try {
-          const scale = (maxWidth && v.videoWidth > maxWidth) ? maxWidth / v.videoWidth : 1;
-          const cw = Math.max(1, Math.round(v.videoWidth * scale));
-          const ch = Math.max(1, Math.round(v.videoHeight * scale));
-          const c = document.createElement('canvas');
-          c.width = cw; c.height = ch;
-          c.getContext('2d').drawImage(v, 0, 0, cw, ch);
-          resolve(c.toDataURL('image/jpeg', (quality || 80) / 100));
-        } catch (e) { reject(e); }
+          const scale = maxWidth && video.videoWidth > maxWidth ? maxWidth / video.videoWidth : 1;
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+          canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+          canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/jpeg', (quality || 80) / 100));
+        } catch (error) { reject(error); }
       };
-      v.onerror = () => reject(new Error('video load error'));
+      video.onerror = () => reject(new Error('video load error'));
+      video.src = url;
+    }).finally(() => {
+      clearTimeout(timeout);
+      video.onseeked = video.onloadedmetadata = video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
     });
   };
 
@@ -143,13 +169,21 @@
   NS.compress = async function (url, cfg, onProgress) {
     if (!NS.isSupported()) throw new Error('WebCodecs not supported in this browser');
     const id = cfg.id;
-    cancelled.delete(id);
-    active.add(id);
+    const controller = new AbortController();
+    active.set(id, controller);
+    let file = null, encoder = null, decoder = null;
+    try {
+    if (cancelled.has(id)) throw new Error('cancelled');
+    const buf = prepared && prepared.url === url ? prepared.buffer : await fetchBuffer(url, controller.signal);
+    prepared = null;
+    clearTimeout(preparedTimer);
+    if (cancelled.has(id)) throw new Error('cancelled');
+    // MP4Box 2.x discards media data by default; extraction needs it retained.
+    file = MP4Box.createFile(true);
 
-    const buf = await fetchBuffer(url);
-    const file = MP4Box.createFile();
-
+    let readyTimeout;
     const ready = new Promise((resolve, reject) => {
+      readyTimeout = setTimeout(() => reject(new Error('metadata timed out')), DEMUX_TIMEOUT_MS);
       file.onError = (e) => reject(new Error('mp4box: ' + e));
       file.onReady = (info) => resolve(info);
     });
@@ -157,7 +191,7 @@
     buf.fileStart = 0;
     file.appendBuffer(buf);
     file.flush();
-    const info = await ready;
+    const info = await ready.finally(() => clearTimeout(readyTimeout));
     const vTrack = info.videoTracks[0];
     if (!vTrack) throw new Error('no video track');
 
@@ -224,7 +258,7 @@
     });
 
     let encodeError = null;
-    const encoder = new VideoEncoder({
+    encoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
       error: (e) => { encodeError = e; },
     });
@@ -244,8 +278,9 @@
     /// Frames the encoder actually accepted — the basis for the real output
     /// duration, so a truncated encode can't be reported as full length.
     let encodedFrames = 0;
+    let encodedStart = Infinity, encodedEnd = -Infinity;
 
-    const decoder = new VideoDecoder({
+    decoder = new VideoDecoder({
       output: (frame) => {
         if (cancelled.has(id)) { frame.close(); return; }
         let toEncode = frame;
@@ -258,8 +293,12 @@
         }
         const keyFrame = (frameIndex % keyInterval) === 0;
         frameIndex++;
-        encoder.encode(toEncode, { keyFrame });
-        toEncode.close();
+        try {
+          encoder.encode(toEncode, { keyFrame });
+          encodedStart = Math.min(encodedStart, toEncode.timestamp);
+          encodedEnd = Math.max(encodedEnd, toEncode.timestamp + (toEncode.duration || 1e6 / (srcFps || fps)));
+        } catch (error) { encodeError = error; }
+        finally { toEncode.close(); }
         encodedFrames++;
         processed++;
         if (onProgress && (processed % 5 === 0)) {
@@ -277,47 +316,47 @@
       codedHeight: srcH,
     });
 
-    // Collect samples and feed the decoder.
-    let fed = 0;
-    const samplesReady = new Promise((resolve, reject) => {
-      file.onSamples = (trackId, user, samples) => {
-        try {
-          for (const s of samples) {
-            if (cancelled.has(id)) break;
-            decoder.decode(new EncodedVideoChunk({
-              type: s.is_sync ? 'key' : 'delta',
-              timestamp: (s.cts * 1e6) / timescale,
-              duration: (s.duration * 1e6) / timescale,
-              data: s.data,
-            }));
-            fed++;
-          }
-          if (samples.length && samples[samples.length - 1].number >= totalSamples - 1) {
-            resolve();
-          }
-        } catch (e) { reject(e); }
-      };
-    });
-
-    try {
-      file.setExtractionOptions(vTrack.id, null, { nbSamples: totalSamples });
+    // Pause extraction after each batch. Decode and encode it before requesting
+    // more, bounding both hardware queues and retained sample data.
+    let fed = 0, batch = null;
+    file.onSamples = (trackId, user, samples) => { batch = samples; file.stop(); };
+    file.setExtractionOptions(vTrack.id, null, { nbSamples: 8 });
+    while (fed < totalSamples) {
+      if (cancelled.has(id)) throw new Error('cancelled');
+      if (encodeError) throw encodeError;
+      batch = null;
       file.start();
-      // mp4box normally delivers every sample synchronously from start() (the
-      // whole file is buffered). Don't assume it: if it ever batches, waiting a
-      // single tick would flush the decoder early and silently truncate the
-      // output, so poll until every sample is in (bounded).
-      await Promise.race([samplesReady, new Promise((r) => setTimeout(r, 0))]);
       const deadline = Date.now() + DEMUX_TIMEOUT_MS;
-      while (fed < totalSamples && Date.now() < deadline && !cancelled.has(id)) {
-        await new Promise((r) => setTimeout(r, 10));
+      while (!batch && Date.now() < deadline && !cancelled.has(id)) {
+        await new Promise((r) => setTimeout(r, 5));
       }
-      // Fail loudly rather than flushing a partial stream: a truncated video that
-      // reports success is far worse than an error the caller can retry.
-      if (fed < totalSamples && !cancelled.has(id)) {
-        throw new Error(
-          'demux timed out: fed ' + fed + ' of ' + totalSamples + ' samples');
+      if (cancelled.has(id)) throw new Error('cancelled');
+      if (!batch || !batch.length) throw new Error('demux timed out');
+      for (const sample of batch) {
+        if (cancelled.has(id)) throw new Error('cancelled');
+        while (decoder.decodeQueueSize >= 8 || encoder.encodeQueueSize >= 8) {
+          if (encodeError) throw encodeError;
+          if (cancelled.has(id)) throw new Error('cancelled');
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        decoder.decode(new EncodedVideoChunk({
+          type: sample.is_sync ? 'key' : 'delta',
+          timestamp: sample.cts * 1e6 / timescale,
+          duration: sample.duration * 1e6 / timescale,
+          data: sample.data,
+        }));
+        fed++;
+        file.releaseUsedSamples(vTrack.id, sample.number + 1);
       }
-
+      // Encoder output is drained too, so asynchronous decoder callbacks cannot
+      // build an unbounded encoder queue.
+      while (decoder.decodeQueueSize > 0) {
+        if (encodeError) throw encodeError;
+        if (cancelled.has(id)) throw new Error('cancelled');
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      await encoder.flush();
+    }
       await decoder.flush();
       await encoder.flush();
       if (encodeError) throw encodeError;
@@ -333,7 +372,7 @@
           width: srcW, height: srcH, durationMs,
           // The source is returned untouched, so report *its* codec, not the one
           // we were going to encode with.
-          codec: (vTrack.codec || '').startsWith('hev') ? 'h265' : 'h264',
+          codec: /^(hev|hvc)/.test(vTrack.codec || '') ? 'h265' : (vTrack.codec || '').startsWith('avc') ? 'h264' : vTrack.codec || 'unknown',
           frameRate: srcFps, hasAudio: srcHasAudio, skipped: true,
         };
       }
@@ -345,20 +384,23 @@
         width: tw, height: th,
         // Derived from what was actually encoded, not from the source header.
         durationMs: encodedFrames > 0
-          ? Math.round((encodedFrames / Math.max(fps, 1)) * 1000)
+          ? Math.round((encodedEnd - encodedStart) / 1000)
           : durationMs,
         codec: usedCodec,
-        frameRate: fps,
+        frameRate: encodedEnd > encodedStart ? encodedFrames * 1e6 / (encodedEnd - encodedStart) : srcFps,
         // v1 never carries audio through; say so instead of implying otherwise.
         hasAudio: false,
         skipped: false,
       };
+    } catch (error) {
+      if (cancelled.has(id) || error.name === 'AbortError') throw new Error('cancelled');
+      throw error;
     } finally {
       // WebCodecs codecs hold hardware/GPU resources; leaking a pair per run
       // makes the browser refuse to create encoders after a few compressions.
       closeQuietly(decoder);
       closeQuietly(encoder);
-      try { file.flush(); } catch (_) {}
+      try { if (file) file.stop(); } catch (_) {}
       // Don't let ids pile up: cancel() adds unconditionally, including for jobs
       // that had already finished.
       cancelled.delete(id);
@@ -439,9 +481,9 @@
       let canvas = draw(w, h);
       let fitted = await fit(canvas, target, 1);
       let tries = 0;
-      while (target && fitted.blob && fitted.blob.size > target && tries < 5 &&
-             canvas.width > 32) {
-        w = Math.round(canvas.width * 0.75); h = Math.round(canvas.height * 0.75);
+      while (target && fitted.blob && fitted.blob.size > target && tries < 24 &&
+             (canvas.width > 1 || canvas.height > 1)) {
+        w = Math.max(1, Math.floor(canvas.width * 0.75)); h = Math.max(1, Math.floor(canvas.height * 0.75));
         canvas = draw(w, h);
         // A smaller image fits at least the quality the last round reached.
         fitted = await fit(canvas, target, fitted.quality);
@@ -449,6 +491,7 @@
       }
       const out = fitted.blob;
       if (!out) throw new Error('image encode failed');
+      if (target && out.size > target) throw new Error('Target image size cannot be met');
 
       // Re-encoding can end up larger than the source (already-compressed input,
       // or lossless). If so, hand back the untouched original.
@@ -569,6 +612,8 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
+    // Give the browser time to consume the URL before a caller releases it.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     return name;
   };
 
@@ -586,5 +631,6 @@
       try { URL.revokeObjectURL(url); } catch (_) {}
     }
     OUTPUT_URLS.clear();
+    prepared = null; clearTimeout(preparedTimer);
   };
 })();
