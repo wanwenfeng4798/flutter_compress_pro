@@ -32,12 +32,17 @@ abstract final class SizeMath {
   /// `true`; **web passes `false`** because its v1 pipeline drops the audio
   /// track, so the whole budget belongs to video. Making that an argument keeps
   /// the divergence explicit and testable instead of forking the algorithm.
+  ///
+  /// [audioKbpsOverride] is **web-only**: web copies the source's AAC track
+  /// unchanged, so the audio budget is the source's bitrate, not
+  /// `config.audioBitrateKbps` (native engines re-encode at the configured rate).
   static int videoBitrateBps({
     required VideoCompressConfig config,
     required int durationMs,
     required int sourceBitrateKbps,
     required int targetHeight,
     bool reserveAudio = true,
+    int? audioKbpsOverride,
   }) {
     final targetMB = config.targetSizeMB;
     if (targetMB != null) {
@@ -45,7 +50,8 @@ abstract final class SizeMath {
       final durationSec = (durationMs / 1000.0).clamp(0.001, double.infinity);
       final audioBps = (!reserveAudio || config.removeAudio)
           ? 0
-          : (config.audioBitrateKbps ?? defaultAudioKbps) * 1000;
+          : (audioKbpsOverride ?? config.audioBitrateKbps ?? defaultAudioKbps) *
+                1000;
       final videoBits = totalBits * sizeSafety - audioBps * durationSec;
       return _atLeastMin((videoBits / durationSec).toInt());
     }

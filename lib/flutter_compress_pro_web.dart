@@ -80,7 +80,8 @@ extension type _JsBytesResult(JSObject _) implements JSObject {
 /// mp4box.js demuxing and mp4-muxer muxing — the browser-native parallel to
 /// Media3 (Android) and AVFoundation (iOS). No FFmpeg.
 ///
-/// v1 transcodes video only (audio is dropped); trim is not yet applied on web.
+/// Video is re-encoded (trim and frame-rate cap are honoured); AAC-LC audio is
+/// copied through unchanged, and other audio codecs are dropped.
 class FlutterCompressWeb extends FlutterCompressPlatform {
   static void registerWith(Registrar registrar) {
     FlutterCompressPlatform.instance = FlutterCompressWeb();
@@ -217,24 +218,37 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
     final srcW = (m['width'] as num).toInt();
     final srcH = (m['height'] as num).toInt();
     config.validate();
-    final durationMs = (m['durationMs'] as num).toInt();
+    final durationMs = SizeMath.durationMs(
+      (m['durationMs'] as num).toInt(),
+      config,
+    );
     final srcKbps = (m['bitrateKbps'] as num).toInt();
     final (tw, th) = SizeMath.targetDimensions(srcW, srcH, config);
+    final audioBps = _audioBps(m, config);
     final videoBps = SizeMath.videoBitrateBps(
       config: config,
       durationMs: durationMs,
       sourceBitrateKbps: srcKbps,
       targetHeight: th,
-      // Web v1 drops the audio track, so the whole budget goes to video.
-      reserveAudio: false,
+      reserveAudio: audioBps > 0,
+      audioKbpsOverride: audioBps ~/ 1000,
     );
-    final bytes = (videoBps * (durationMs / 1000) / 8).round();
+    final bytes = ((videoBps + audioBps) * (durationMs / 1000) / 8).round();
     return CompressionEstimate.fromMap({
       'estimatedSizeBytes': bytes,
-      'estimatedBitrateKbps': videoBps ~/ 1000,
+      'estimatedBitrateKbps': (videoBps + audioBps) ~/ 1000,
       'targetWidth': tw,
       'targetHeight': th,
     });
+  }
+
+  /// Bits/sec the copied audio track will add to the output: 0 when it is
+  /// removed or can't be carried through (anything but AAC-LC), otherwise the
+  /// source track's own bitrate (web never re-encodes audio).
+  int _audioBps(Map<dynamic, dynamic> info, VideoCompressConfig config) {
+    if (config.removeAudio || info['audioPassthrough'] != true) return 0;
+    final kbps = (info['audioBitrateKbps'] as num?)?.toInt() ?? 0;
+    return (kbps > 0 ? kbps : SizeMath.defaultAudioKbps) * 1000;
   }
 
   // ---- compress ----------------------------------------------------------
@@ -259,18 +273,21 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
       _checkCancelled(id);
       final srcW = (m['width'] as num).toInt();
       final srcH = (m['height'] as num).toInt();
-      final durationMs = (m['durationMs'] as num).toInt();
+      final fullDurationMs = (m['durationMs'] as num).toInt();
+      final durationMs = SizeMath.durationMs(fullDurationMs, config);
       final srcKbps = (m['bitrateKbps'] as num).toInt();
       final srcBytes = (m['sizeBytes'] as num).toInt();
       final (tw, th) = SizeMath.targetDimensions(srcW, srcH, config);
+      final audioBps = _audioBps(m, config);
       final videoBps = SizeMath.videoBitrateBps(
         config: config,
         durationMs: durationMs,
         sourceBitrateKbps: srcKbps,
         targetHeight: th,
-        // Web v1 drops the audio track, so the whole budget goes to video.
-        reserveAudio: false,
+        reserveAudio: audioBps > 0,
+        audioKbpsOverride: audioBps ~/ 1000,
       );
+      final trim = config.trim;
 
       final cfg =
           <String, Object?>{
@@ -279,6 +296,11 @@ class FlutterCompressWeb extends FlutterCompressPlatform {
                 'targetHeight': th,
                 'videoBitrateBps': videoBps,
                 'frameRate': (m['frameRate'] as num?)?.toDouble() ?? 30,
+                // Cap only; the engine never raises the source's frame rate.
+                'capFrameRate': config.frameRate,
+                'removeAudio': config.removeAudio,
+                'trimStartMs': trim?.startMs,
+                'trimEndMs': trim?.endMs,
                 // Requested codec; the JS engine encodes HEVC when the browser supports
                 // it, otherwise falls back to H.264 (and reports which was used).
                 'codec': config.codec.name,

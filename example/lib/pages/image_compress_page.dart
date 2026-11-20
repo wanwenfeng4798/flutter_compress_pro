@@ -89,6 +89,9 @@ class _ImageCompressPageState extends State<ImageCompressPage>
 
   Future<void> _pickOutputDir() async {
     final l10n = AppLocalizations.of(context);
+    // The plugin needs a real filesystem path; pickDirectory() returns a Uri
+    // (content:// on Android) that cannot be used as an output directory.
+    // ignore: deprecated_member_use
     final dir = await FilePicker.getDirectoryPath();
     if (mounted && dir != null) {
       setState(() => _outputDir = dir);

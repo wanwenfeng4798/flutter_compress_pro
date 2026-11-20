@@ -13,7 +13,7 @@ concurrency:
 
 env:
   # Keep in step with pubspec.yaml's `flutter:` constraint.
-  FLUTTER_VERSION: 3.47.7
+  FLUTTER_VERSION: 3.50.0
 
 jobs:
   # Fast feedback: format, analyze, test. Ordered cheapest-first.
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: '17'

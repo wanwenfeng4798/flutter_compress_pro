@@ -77,15 +77,17 @@ abstract final class FfmpegVideo {
         : codecName.isEmpty
         ? null
         : codecName;
-    final tags = video['tags'];
-    final rotation = tags is Map
-        ? int.tryParse('${tags['rotate'] ?? 0}') ?? 0
-        : 0;
+    final rotation = parseRotation(video);
+    final quarterTurn = rotation == 90 || rotation == 270;
+    final codedWidth = (video['width'] as num?)?.toInt() ?? 0;
+    final codedHeight = (video['height'] as num?)?.toInt() ?? 0;
 
+    // Report the *displayed* size (like iOS): ffmpeg auto-rotates before any
+    // `-vf` filter runs, so scale targets must be computed in that space.
     return VideoInfo(
       path: path,
-      width: (video['width'] as num?)?.toInt() ?? 0,
-      height: (video['height'] as num?)?.toInt() ?? 0,
+      width: quarterTurn ? codedHeight : codedWidth,
+      height: quarterTurn ? codedWidth : codedHeight,
       durationMs: (durationSec * 1000).round(),
       sizeBytes: sizeBytes,
       bitrateKbps: bitRate ~/ 1000,
@@ -320,6 +322,31 @@ abstract final class FfmpegVideo {
     } finally {
       PluginCache.release(out);
     }
+  }
+
+  /// Clockwise display rotation (0/90/180/270) of an ffprobe video stream.
+  ///
+  /// Newer ffmpeg writes it as a `displaymatrix` side-data `rotation`
+  /// (counter-clockwise, so `-90` means a portrait phone clip); older builds
+  /// use the `rotate` tag (clockwise).
+  static int parseRotation(Map<String, dynamic> stream) {
+    num? degrees;
+    final side = stream['side_data_list'];
+    if (side is List) {
+      for (final entry in side) {
+        if (entry is Map && entry['rotation'] != null) {
+          final r = num.tryParse('${entry['rotation']}');
+          if (r != null) degrees = -r;
+          break;
+        }
+      }
+    }
+    if (degrees == null) {
+      final tags = stream['tags'];
+      if (tags is Map) degrees = num.tryParse('${tags['rotate'] ?? 0}');
+    }
+    final normalized = (((degrees ?? 0) / 90).round() * 90) % 360;
+    return normalized < 0 ? normalized + 360 : normalized;
   }
 
   static double? _parseFps(dynamic raw) {

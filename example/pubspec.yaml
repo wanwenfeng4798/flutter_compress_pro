@@ -37,9 +37,9 @@ dependencies:
 
 
   # Native file / directory pickers for the demo.
-  file_picker: ^13.1.0
+  file_picker: ^13.4.0
 
-  material_ui: ^1.7.0
+  material_ui: ^1.11.1
   cupertino_icons: ^2.0.0
 
 dev_dependencies:

@@ -5,7 +5,7 @@ of any app that uses this plugin. They are loaded lazily — only when video
 compression is first used on web — so an app that never compresses video on web
 never downloads them. Image compression on web needs neither.
 
-MP4Box 2.4.1 is bundled from the upstream ES module using esbuild 0.28.2
+MP4Box 2.5.0 is bundled from the upstream ES module using esbuild 0.28.2
 (`--bundle --format=iife --global-name=MP4Box --minify`). A compatibility footer
 exposes `DataStream = MP4Box.DataStream` and maps `DataStream.BIG_ENDIAN` to
 `MP4Box.Endianness.BIG_ENDIAN`. Its upstream source is otherwise unchanged.
@@ -13,7 +13,7 @@ mp4-muxer 5.2.2 is shipped unmodified from the upstream browser build.
 
 | File | Version | Upstream | Licence |
 |---|---|---|---|
-| `mp4box.all.min.js` | 2.4.1 | [gpac/mp4box.js](https://github.com/gpac/mp4box.js) | BSD-3-Clause |
+| `mp4box.all.min.js` | 2.5.0 | [gpac/mp4box.js](https://github.com/gpac/mp4box.js) | BSD-3-Clause |
 | `mp4-muxer.js` | 5.2.2 | [Vanilagy/mp4-muxer](https://github.com/Vanilagy/mp4-muxer) | MIT |
 
 `flutter_compress_pro_web.js` (20 KB) is this plugin's own code and is covered by the

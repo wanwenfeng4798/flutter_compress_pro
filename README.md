@@ -71,10 +71,10 @@ iOS and macOS share one Swift tree via Flutter’s [`sharedDarwinSource`](https:
 | Compress (target size / bitrate / quality) |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
 | HEVC (H.265) with H.264 fallback           |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
 | Resolution cap (`maxWidth`/`maxHeight`)    |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
-| Frame-rate cap (`frameRate`)               |        ❌ ²          |         ✅         |       ❌ ²        |          ✅          |            ✅             |
-| Audio: remove                              |          ✅           |         ✅         |    ❌ always off   |          ✅          |            ✅             |
-| Audio: bitrate (`audioBitrateKbps`)        |        ❌ ³          |         ✅         |        ❌         |          ✅          |            ✅             |
-| Trim (`trim`)                              |          ✅           |         ✅         |        ❌         |          ✅          |            ✅             |
+| Frame-rate cap (`frameRate`)               |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
+| Audio: remove / keep                       |          ✅           |         ✅         |       ✅ ²        |          ✅          |            ✅             |
+| Audio: bitrate (`audioBitrateKbps`)        |          ✅           |         ✅         |      ❌ ²         |          ✅          |            ✅             |
+| Trim (`trim`)                              |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
 | Thumbnail / info / estimate                |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
 | Progress / cancel / batch                  |          ✅           |         ✅         |        ✅         |          ✅          |            ✅             |
 | Background compression                     |   ⚠️ opt-in ⁴         | ✅ background task |       n/a        |         n/a         |           n/a            |
@@ -85,13 +85,9 @@ iOS and macOS share one Swift tree via Flutter’s [`sharedDarwinSource`](https:
 Linux use `libx265` when present (auto-download includes it) and fall back to
 `libx264` if HEVC encode fails.
 
-² Only iOS, macOS, Windows and Linux decimate frames. Media3 has no frame-dropping
-effect, and the web pipeline re-encodes every decoded frame — on Android/Web,
-`frameRate` is ignored on Android and Web. Read `result.frameRate`
-for what was actually written.
-
-³ Media3 exposes no audio-encoder settings, so Android encodes AAC at its own
-default. The value still shapes the `targetSizeMB` budget.
+² Web copies the source's AAC-LC audio through unchanged (it is trimmed with the
+video and removed by `removeAudio`). It cannot re-encode, so `audioBitrateKbps` is
+ignored and any other audio codec is dropped — read `result.hasAudio`.
 
 ⁴ Android needs a foreground service, and its notification must be yours — pass
 `androidNotification` and declare `FOREGROUND_SERVICE`. Without either, the encode
@@ -99,7 +95,8 @@ runs foreground-only; nothing throws. See
 [Background compression on Android](#background-compression-on-android). iOS needs
 nothing (`beginBackgroundTask`: no UI, no permission). Desktop has no equivalent.
 
-Anything marked ❌ is **ignored**, not approximated — the result object reports what
+`frameRate` is a cap only: frames are dropped, never added, and a cap at or above
+the source rate changes nothing. Anything marked ❌ is **ignored**, not approximated — the result object reports what
 actually happened (`result.frameRate`, `result.hasAudio`, `result.durationMs`).
 
 ### 🖼️ Image
@@ -129,7 +126,7 @@ JPEG is reliable; other formats depend on the muxer.
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.2.1
+  flutter_compress_pro: ^0.2.2
 ```
 
 ## Integrate with an AI assistant
@@ -497,7 +494,8 @@ add user-selected file access to both Debug and Release entitlements, or you get
 
 ## Known limitations
 
-- **Web (v1):** audio is dropped and `trim` is not yet applied.
+- **Web:** only AAC-LC audio is carried through (other codecs are dropped) and
+  `audioBitrateKbps` has no effect.
 - **Windows / Linux:** codec features follow the FFmpeg build in use (auto-download
   is GPL with libx264/libx265). HEIC image encode falls back to JPEG.
 
@@ -518,9 +516,8 @@ output directory. Saving onto the source itself returns its path without deletin
 Configuration is validated in release builds as well as debug builds. Tiny dimension
 caps never enlarge a source, and `DimensionAlignment.none` keeps exact dimensions; an
 encoder can reject dimensions it cannot encode. A target image size either fits (including
-metadata) or raises an error when the format cannot meet it. Web video still drops audio
-and ignores trim/frame-rate caps; its budget uses the full duration and its result reports
-actual timestamps. Desktop support detection checks installed/cached FFmpeg without
+metadata) or raises an error when the format cannot meet it. Web video copies AAC-LC audio
+unchanged and honours trim and frame-rate caps; its result reports actual timestamps. Desktop support detection checks installed/cached FFmpeg without
 automatically downloading it. Auto-download uses a pinned build with SHA-256 checks.
 
 For regressions, run `flutter test`, `node tool/web_engine_test.cjs`, and on macOS

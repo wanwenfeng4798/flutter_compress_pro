@@ -8,7 +8,9 @@ import android.os.Looper
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.Presentation
+import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -120,7 +122,7 @@ class CompressionEngine(
             try {
                 val export = exportWithFallback(
                     id = id,
-                    editedItem = buildEditedItem(path, config, srcW, srcH, tw, th),
+                    editedItem = buildEditedItem(path, config, srcW, srcH, tw, th, info["frameRate"] as? Double),
                     outFile = outFile,
                     config = config,
                     videoBps = videoBps,
@@ -182,7 +184,7 @@ class CompressionEngine(
     }
 
     private fun buildEditedItem(
-        path: String, config: CompressionConfig, srcW: Int, srcH: Int, tw: Int, th: Int,
+        path: String, config: CompressionConfig, srcW: Int, srcH: Int, tw: Int, th: Int, srcFps: Double?,
     ): EditedMediaItem {
         val item = MediaItem.Builder().setUri(Uri.fromFile(File(path)))
         if (config.trimStartMs != null && config.trimEndMs != null) {
@@ -197,14 +199,15 @@ class CompressionEngine(
         // it unconditionally runs every frame through the GL pipeline, which on
         // slower devices produces frames faster than the encoder drains them —
         // the surface runs out of buffers and frames are silently dropped.
-        val effects = if (tw == srcW && th == srcH) {
-            Effects(emptyList(), emptyList())
-        } else {
-            Effects(
-                emptyList(),
-                listOf(Presentation.createForWidthAndHeight(tw, th, Presentation.LAYOUT_SCALE_TO_FIT)),
-            )
+        val videoEffects = mutableListOf<androidx.media3.common.Effect>()
+        if (tw != srcW || th != srcH) {
+            videoEffects += Presentation.createForWidthAndHeight(tw, th, Presentation.LAYOUT_SCALE_TO_FIT)
         }
+        // Cap only: the source rate is kept when it is already at or below the cap.
+        if (shouldCapFrameRate(config.frameRate, srcFps)) {
+            videoEffects += FrameDropEffect.createDefaultFrameDropEffect(config.frameRate!!.toFloat())
+        }
+        val effects = Effects(emptyList(), videoEffects)
         return EditedMediaItem.Builder(item.build())
             .setRemoveAudio(config.removeAudio)
             .setEffects(effects)
@@ -275,6 +278,7 @@ class CompressionEngine(
                 outFile,
                 mime,
                 encoderSettings(config, mime, videoBps, forceVbr),
+                config.audioBitrateKbps?.let { it * 1000 },
                 config.notification,
             )
         }
@@ -340,10 +344,16 @@ class CompressionEngine(
         outFile: File,
         videoMime: String,
         videoEncoderSettings: VideoEncoderSettings,
+        audioBitrateBps: Int?,
         notification: CompressionService.NotificationSpec?,
     ): ExportResult = suspendCancellableCoroutine { cont ->
         val encoderFactory = DefaultEncoderFactory.Builder(context)
             .setRequestedVideoEncoderSettings(videoEncoderSettings)
+            .apply {
+                audioBitrateBps?.let {
+                    setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(it).build())
+                }
+            }
             .setEnableFallback(true) // let Media3 downgrade unsupported settings
             .build()
 
@@ -514,8 +524,12 @@ class CompressionEngine(
         e.cause?.let { append("; cause=").append(it.message ?: it.toString()) }
     }
 
-    private companion object {
+    internal companion object {
         const val TAG = "FlutterCompress"
+
+        /** True when [cap] is below the source rate (a cap never raises fps). */
+        fun shouldCapFrameRate(cap: Double?, sourceFps: Double?): Boolean =
+            cap != null && cap > 0 && (sourceFps == null || sourceFps <= 0 || cap < sourceFps * 0.99)
 
         /** MediaCodec's documented "as fast as possible" operating rate. */
         const val OPERATING_RATE_MAX = 32767 // Short.MAX_VALUE

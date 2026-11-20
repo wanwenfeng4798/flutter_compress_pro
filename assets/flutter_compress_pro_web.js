@@ -4,8 +4,8 @@
  * Pipeline: fetch blob -> mp4box demux -> VideoDecoder -> (canvas rescale) ->
  * VideoEncoder(target bitrate) -> mp4-muxer -> Blob(mp4) -> object URL.
  *
- * v1 transcodes VIDEO only (audio is dropped) — a documented limitation;
- * audio passthrough/re-encode is a follow-up. H.264 output (broadest support).
+ * Video is re-encoded (optional trim and frame-rate cap); AAC-LC audio is copied
+ * through untouched (other audio codecs are dropped).
  *
  * Depends on globals: MP4Box, DataStream (from mp4box.all.min.js), Mp4Muxer.
  */
@@ -87,6 +87,29 @@
     return undefined;
   }
 
+  // ---- audio passthrough -------------------------------------------------
+
+  const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+    16000, 12000, 11025, 8000, 7350];
+
+  /** 2-byte AudioSpecificConfig for AAC-LC, or null if it can't be expressed. */
+  function aacConfig(sampleRate, channels) {
+    const index = AAC_RATES.indexOf(sampleRate);
+    if (index < 0 || !(channels >= 1 && channels <= 6)) return null;
+    const value = (2 << 11) | (index << 7) | (channels << 3);
+    return new Uint8Array([value >> 8, value & 0xff]);
+  }
+
+  /**
+   * Whether an audio track can be copied into the output as-is. Only AAC-LC is
+   * carried through (the muxer's only audio codec we can describe exactly);
+   * anything else is dropped rather than risking an undecodable track.
+   */
+  function canPassAudio(track) {
+    return !!(track && /^mp4a\.40\.2$/.test(track.codec || '') && track.audio &&
+      aacConfig(track.audio.sample_rate, track.audio.channel_count));
+  }
+
   // ---- info --------------------------------------------------------------
 
   NS.getInfo = async function (url, id) {
@@ -120,6 +143,9 @@
         bitrateKbps: Math.round(sizeBytes * 8 / Math.max(durationMs / 1000, 0.001) / 1000),
         frameRate: isFinite(fps) ? fps : null, codec: video.codec || null,
         hasAudio: (info.audioTracks || []).length > 0, rotation: 0,
+        // Whether compress() can carry the audio through, and what it costs.
+        audioPassthrough: canPassAudio((info.audioTracks || [])[0]),
+        audioBitrateKbps: Math.round((((info.audioTracks || [])[0] || {}).bitrate || 0) / 1000),
       };
     } catch (error) {
       if (id && (cancelled.has(id) || error.name === 'AbortError')) throw new Error('cancelled');
@@ -202,7 +228,38 @@
     const srcW = vTrack.video ? vTrack.video.width : vTrack.track_width;
     const srcH = vTrack.video ? vTrack.video.height : vTrack.track_height;
     const needResize = tw !== srcW || th !== srcH;
-    const fps = cfg.frameRate && cfg.frameRate > 0 ? cfg.frameRate : 30;
+    // Real source rate from the track itself; the config value is only a fallback.
+    const measuredFps = durationMs > 0 && totalSamples > 1 ? (totalSamples * 1000) / durationMs : 0;
+    const sourceFps = measuredFps > 0 ? measuredFps
+      : (cfg.frameRate && cfg.frameRate > 0 ? cfg.frameRate : 30);
+    // Frame-rate cap: only ever drops frames, never invents them.
+    const cap = cfg.capFrameRate > 0 && cfg.capFrameRate < sourceFps * 0.99 ? cfg.capFrameRate : 0;
+    const fps = cap || sourceFps;
+    const capInterval = cap ? 1e6 / cap : 0;
+    let nextKeepTs = null;
+
+    // Trim window (µs). Decoding starts at the keyframe at or before the start.
+    const trimStartMs = cfg.trimStartMs > 0 ? cfg.trimStartMs : 0;
+    const trimEndMs = cfg.trimEndMs > 0 ? Math.min(cfg.trimEndMs, durationMs) : durationMs;
+    const trimmed = trimStartMs > 0 || trimEndMs < durationMs;
+    const startUs = trimStartMs * 1000, endUs = trimEndMs * 1000;
+    let startIdx = 0, endIdx = totalSamples;
+    if (trimmed) {
+      const table = (file.getTrackById(vTrack.id) || {}).samples || [];
+      for (let i = 0; i < table.length; i++) {
+        if (table[i].cts * 1e6 / timescale > startUs) break;
+        if (table[i].is_sync) startIdx = i;
+      }
+      for (let i = startIdx; i < table.length; i++) {
+        if (table[i].dts * 1e6 / timescale >= endUs) { endIdx = i; break; }
+      }
+      if (endIdx <= startIdx) throw new Error('trim range is empty');
+    }
+    const toDecode = endIdx - startIdx;
+
+    // Audio is copied through (AAC-LC) unless removed; trimmed to the window.
+    const aTrack = (info.audioTracks || [])[0];
+    const keepAudio = !cfg.removeAudio && canPassAudio(aTrack);
     // Source facts, reported back verbatim on the skipped path.
     const srcFps = vTrack.nb_samples > 0 && vTrack.movie_duration > 0
       ? vTrack.nb_samples / (vTrack.movie_duration / vTrack.movie_timescale)
@@ -251,10 +308,16 @@
     const muxer = new Mp4Muxer.Muxer({
       target: new Mp4Muxer.ArrayBufferTarget(),
       video: { codec: muxerCodec, width: tw, height: th },
+      ...(keepAudio ? { audio: {
+        codec: 'aac',
+        numberOfChannels: aTrack.audio.channel_count,
+        sampleRate: aTrack.audio.sample_rate,
+      } } : {}),
       fastStart: 'in-memory',
-      // Real videos' first frame rarely has DTS/CTS 0 (container offsets);
-      // shift all timestamps so the first is zero, as mp4-muxer requires.
-      firstTimestampBehavior: 'offset',
+      // Real videos' first frame rarely has DTS/CTS 0 (container offsets), and
+      // a trim starts mid-file; shift every track by the same amount so the
+      // first timestamp is zero and audio stays in sync with video.
+      firstTimestampBehavior: 'cross-track-offset',
     });
 
     let encodeError = null;
@@ -282,7 +345,24 @@
 
     decoder = new VideoDecoder({
       output: (frame) => {
+        processed++;
+        if (onProgress && (processed % 5 === 0)) {
+          onProgress(Math.min(processed / toDecode, 0.99), 0);
+        }
         if (cancelled.has(id)) { frame.close(); return; }
+        // Frames before the trim start (decoded only to reach it) and after its
+        // end are discarded; the tolerance absorbs timestamp rounding.
+        if (trimmed && (frame.timestamp < startUs - 1000 || frame.timestamp >= endUs)) {
+          frame.close(); return;
+        }
+        if (capInterval) {
+          const ts = frame.timestamp;
+          if (nextKeepTs !== null && ts < nextKeepTs - capInterval * 0.25) {
+            frame.close(); return;
+          }
+          nextKeepTs = (nextKeepTs === null ? ts : Math.max(nextKeepTs, ts - capInterval * 0.25))
+            + capInterval;
+        }
         let toEncode = frame;
         if (needResize) {
           ctx.drawImage(frame, 0, 0, tw, th);
@@ -296,14 +376,10 @@
         try {
           encoder.encode(toEncode, { keyFrame });
           encodedStart = Math.min(encodedStart, toEncode.timestamp);
-          encodedEnd = Math.max(encodedEnd, toEncode.timestamp + (toEncode.duration || 1e6 / (srcFps || fps)));
+          encodedEnd = Math.max(encodedEnd, toEncode.timestamp + (capInterval || toEncode.duration || 1e6 / (srcFps || fps)));
         } catch (error) { encodeError = error; }
         finally { toEncode.close(); }
         encodedFrames++;
-        processed++;
-        if (onProgress && (processed % 5 === 0)) {
-          onProgress(Math.min(processed / totalSamples, 0.99), 0);
-        }
       },
       error: (e) => { encodeError = e; },
     });
@@ -318,10 +394,26 @@
 
     // Pause extraction after each batch. Decode and encode it before requesting
     // more, bounding both hardware queues and retained sample data.
-    let fed = 0, batch = null;
-    file.onSamples = (trackId, user, samples) => { batch = samples; file.stop(); };
+    let seen = 0, batch = null;
+    const audioSamples = [];
+    file.onSamples = (trackId, user, samples) => {
+      if (aTrack && trackId === aTrack.id) { audioSamples.push(...samples); return; }
+      batch = samples; file.stop();
+    };
+    if (keepAudio) {
+      // AAC samples are small; collect them up front, then hand extraction
+      // back to the video loop.
+      file.setExtractionOptions(aTrack.id, null, { nbSamples: 512 });
+      for (let i = 0; i < 8 && audioSamples.length < aTrack.nb_samples; i++) {
+        const before = audioSamples.length;
+        file.start();
+        if (audioSamples.length === before) break;
+      }
+      file.unsetExtractionOptions(aTrack.id);
+      file.stop();
+    }
     file.setExtractionOptions(vTrack.id, null, { nbSamples: 8 });
-    while (fed < totalSamples) {
+    while (seen < endIdx) {
       if (cancelled.has(id)) throw new Error('cancelled');
       if (encodeError) throw encodeError;
       batch = null;
@@ -334,6 +426,10 @@
       if (!batch || !batch.length) throw new Error('demux timed out');
       for (const sample of batch) {
         if (cancelled.has(id)) throw new Error('cancelled');
+        seen = sample.number + 1;
+        // Before the keyframe that governs the trim start: never decoded.
+        if (sample.number < startIdx) { file.releaseUsedSamples(vTrack.id, seen); continue; }
+        if (sample.number >= endIdx) break;
         while (decoder.decodeQueueSize >= 8 || encoder.encodeQueueSize >= 8) {
           if (encodeError) throw encodeError;
           if (cancelled.has(id)) throw new Error('cancelled');
@@ -345,8 +441,7 @@
           duration: sample.duration * 1e6 / timescale,
           data: sample.data,
         }));
-        fed++;
-        file.releaseUsedSamples(vTrack.id, sample.number + 1);
+        file.releaseUsedSamples(vTrack.id, seen);
       }
       // Encoder output is drained too, so asynchronous decoder callbacks cannot
       // build an unbounded encoder queue.
@@ -362,6 +457,23 @@
       if (encodeError) throw encodeError;
       if (cancelled.has(id)) { cancelled.delete(id); throw new Error('cancelled'); }
 
+      let audioWritten = 0;
+      if (keepAudio) {
+        const description = aacConfig(aTrack.audio.sample_rate, aTrack.audio.channel_count);
+        const meta = { decoderConfig: {
+          codec: 'mp4a.40.2',
+          numberOfChannels: aTrack.audio.channel_count,
+          sampleRate: aTrack.audio.sample_rate,
+          description,
+        } };
+        for (const s of audioSamples) {
+          const ts = s.cts * 1e6 / aTrack.timescale;
+          const dur = s.duration * 1e6 / aTrack.timescale;
+          if (trimmed && (ts + dur <= startUs || ts >= endUs)) continue;
+          muxer.addAudioChunkRaw(s.data, 'key', ts, dur, meta);
+          audioWritten++;
+        }
+      }
       muxer.finalize();
       const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
 
@@ -388,8 +500,8 @@
           : durationMs,
         codec: usedCodec,
         frameRate: encodedEnd > encodedStart ? encodedFrames * 1e6 / (encodedEnd - encodedStart) : srcFps,
-        // v1 never carries audio through; say so instead of implying otherwise.
-        hasAudio: false,
+        // True only when AAC samples were actually copied into the output.
+        hasAudio: audioWritten > 0,
         skipped: false,
       };
     } catch (error) {

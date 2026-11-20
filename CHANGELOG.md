@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Update example dependencies (file_picker 13.4.0, material_ui 1.11.1 and transitive packages), the vendored MP4Box (2.5.0), the example Gradle wrapper (9.9.2) and CI (Flutter 3.50.0, setup-java 6.3.0).
+- Fix desktop (FFmpeg) handling of rotated sources: read the `displaymatrix` rotation as well as the legacy `rotate` tag and report the displayed size, so portrait clips are no longer scaled with landscape dimensions.
+- Web: add `trim`, `frameRate` cap and AAC-LC audio passthrough (`removeAudio` honoured); bitrate budget accounts for the copied audio.
+- Android: add `frameRate` cap (Media3 `FrameDropEffect`) and `audioBitrateKbps` (audio encoder settings).
+- Fix Android probing of rotated sources: report the displayed (rotated) width/height so resolution caps and size estimates match what Media3 renders.
+
 ## 0.2.1
 
 - Update dependencies, Android build tools, and the vendored MP4Box library.

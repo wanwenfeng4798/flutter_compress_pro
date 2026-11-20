@@ -69,10 +69,10 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 | 压缩(目标大小 / 码率 / 质量)            |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
 | H.265 + 回退 H.264              |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
 | 分辨率上限(`maxWidth`/`maxHeight`) |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
-| 帧率上限(`frameRate`)             |     ❌ ²    |     ✅     |  ❌ ²  |    ✅    |        ✅        |
-| 音频:去除(`removeAudio`)          |     ✅      |     ✅     |   ❌   |    ✅    |        ✅        |
-| 音频码率(`audioBitrateKbps`)      |     ❌ ³    |     ✅     |   ❌   |    ✅    |        ✅        |
-| 裁剪(`trim`)                    |     ✅      |     ✅     |   ❌   |    ✅    |        ✅        |
+| 帧率上限(`frameRate`)             |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
+| 音频:去除 / 保留(`removeAudio`)     |     ✅      |     ✅     |  ✅ ² |    ✅    |        ✅        |
+| 音频码率(`audioBitrateKbps`)      |     ✅      |     ✅     |  ❌ ² |    ✅    |        ✅        |
+| 裁剪(`trim`)                    |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
 | 缩略图 / 信息 / 预估                 |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
 | 进度 / 取消 / 批量                  |     ✅      |     ✅     |   ✅   |    ✅    |        ✅        |
 | 后台不中断                         | ⚠️ 需自行开启 ⁴ |  ✅ 后台任务   |  不适用  |   不适用   |       不适用       |
@@ -80,10 +80,9 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 
 ¹ Web 仅在浏览器支持 WebCodecs 的 HEVC 编码时用 H.265(如 Safari、带硬件 HEVC 的 Chrome),否则自动回退 H.264。Windows / Linux 在有 `libx265` 时编码 HEVC(自动下载包含此编码器),失败则回退 `libx264`。
 
-² 只有 iOS、macOS、Windows、Linux 能真正抽帧。Media3 没有抽帧效果,Web 管线对每一个解码帧都重新编码 —— Android / Web 忽略 `frameRate`。实际帧率请读 `result.frameRate`。
+² Web 原样复制源视频的 AAC-LC 音轨(随视频一起裁剪,`removeAudio` 可去除)。它无法重新编码,因此忽略 `audioBitrateKbps`,其他音频编码会被丢弃 —— 请读 `result.hasAudio`。
 
-³ Media3 不暴露任何音频编码器设置,Android 使用其默认 AAC 码率。该值仍参与
-`targetSizeMB` 的预算计算。
+`frameRate` 只是上限:只会丢帧、不会补帧,上限不低于源帧率时不改变任何东西。
 
 ⁴ Android 需要前台服务,而它的通知必须是你的 —— 传 `androidNotification` 并声明
 `FOREGROUND_SERVICE`。两者缺一,编码就只在前台进行,**不报错**。见
@@ -115,7 +114,7 @@ iOS / macOS 通过 Flutter [`sharedDarwinSource`](https://docs.flutter.dev/packa
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.2.1
+  flutter_compress_pro: ^0.2.2
 ```
 
 ## 配合 AI 助手接入
@@ -419,7 +418,7 @@ App 声明更高版本的 Media3 依然会生效 —— 但插件不会自己悄
 
 ## 已知限制
 
-- **Web(v1)**:丢弃音频,且暂不支持 `trim`。
+- **Web**:只透传 AAC-LC 音频(其他编码会被丢弃),`audioBitrateKbps` 无效。
 
 ## 许可证
 
@@ -434,8 +433,8 @@ Web 输出 URL。原生输出采用独立预留路径，保留已有文件；And
 
 Release 构建也执行配置校验。极小尺寸上限不会放大源画面，`DimensionAlignment.none`
 保留精确尺寸；若编码器不支持该尺寸，会返回编码错误。图片目标体积包含元数据；
-格式无法达到目标时会明确报错。Web 视频仍丢弃音频且忽略裁剪和帧率上限，预算使用
-完整时长，结果按实际时间戳计算。桌面能力检查只检测本地或已缓存的 FFmpeg；
+格式无法达到目标时会明确报错。Web 视频原样复制 AAC-LC 音频并支持裁剪和帧率上限，
+结果按实际时间戳计算。桌面能力检查只检测本地或已缓存的 FFmpeg；
 自动下载固定到具体构建，并校验 SHA-256。
 
 回归命令：`flutter test`、`node tool/web_engine_test.cjs`，以及 macOS 上的

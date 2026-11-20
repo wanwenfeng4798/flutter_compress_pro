@@ -4,11 +4,11 @@
 `flutter_compress_pro`. Everything needed to write correct code is in this file — no
 other page needs to be fetched.
 
-**Package:** `flutter_compress_pro` · **This guide targets:** 0.2.1
+**Package:** `flutter_compress_pro` · **This guide targets:** 0.2.2
 **Source of truth:** <https://pub.dev/packages/flutter_compress_pro>
 
 Before integrating, check the latest version on pub.dev and use it in
-`pubspec.yaml`. If the installed version differs from 0.2.1, prefer the
+`pubspec.yaml`. If the installed version differs from 0.2.2, prefer the
 package's own dartdoc over this file.
 
 **What it does.** Compresses **video** and **images** on Android, iOS, Web,
@@ -30,7 +30,7 @@ written.
    not "refine" the result — the highest-ranked one wins and the rest are dead
    config.
 3. **Options unsupported on a platform are ignored, not approximated.** Setting
-   `frameRate: 24` on Android changes nothing about the output's frame rate.
+   `audioBitrateKbps` on Web changes nothing about the audio.
    Nothing throws. See §7.
 4. **Read the result; do not assume the request was honoured.** `result.codec`,
    `result.frameRate`, `result.hasAudio`, `result.durationMs` and
@@ -45,7 +45,7 @@ written.
 
 ```yaml
 dependencies:
-  flutter_compress_pro: ^0.2.1
+  flutter_compress_pro: ^0.2.2
 ```
 
 No platform registration, no init call. The plugin registers itself.
@@ -181,10 +181,10 @@ print('${result.outputPath} — saved ${result.savedPercent.toStringAsFixed(1)}%
 | `targetSizeMB` | `int?` | `null` | Desired size; the plugin derives the bitrate |
 | `codec` | `VideoCodec` | `h265` | `h265` or `h264`; falls back automatically |
 | `maxWidth` / `maxHeight` | `int?` | `null` | Cap dimensions; aspect kept, **only scales down** |
-| `frameRate` | `double?` | `null` | Cap fps — **iOS / macOS / Windows / Linux**, see §7 |
+| `frameRate` | `double?` | `null` | Cap fps (drops frames, never adds) — all platforms |
 | `removeAudio` | `bool` | `false` | Drop the audio track |
-| `audioBitrateKbps` | `int?` | `null` | Re-encode audio — **iOS only**, see §7 |
-| `trim` | `TrimRange?` | `null` | `TrimRange(startMs:, endMs:)` — **not on Web** |
+| `audioBitrateKbps` | `int?` | `null` | Re-encode audio — all platforms except Web (copies AAC-LC), see §7 |
+| `trim` | `TrimRange?` | `null` | `TrimRange(startMs:, endMs:)` — all platforms |
 | `alignment` | `DimensionAlignment` | `auto16` | `auto16` rounds down to ÷16; `none` disables |
 | `keepOriginalIfLarger` | `bool` | `true` | Return the source untouched if compression would grow it |
 | `container` | `VideoContainer` | `auto` | `auto` keeps the source container where possible; `mp4` forces |
@@ -476,10 +476,10 @@ have the requested property.
 | Target size / bitrate / quality | ✅ | ✅ | ✅ | ✅ | ✅ |
 | H.265 with H.264 fallback | ✅ | ✅ | ✅ ¹ | ✅ | ✅ |
 | `maxWidth` / `maxHeight` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `frameRate` | ❌ ² | ✅ | ❌ ² | ✅ | ✅ |
-| `removeAudio` | ✅ | ✅ | ❌ audio always dropped | ✅ | ✅ |
-| `audioBitrateKbps` | ❌ ³ | ✅ | ❌ | ✅ | ✅ |
-| `trim` | ✅ | ✅ | ❌ | ✅ | ✅ |
+| `frameRate` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `removeAudio` | ✅ | ✅ | ✅ ² | ✅ | ✅ |
+| `audioBitrateKbps` | ✅ | ✅ | ❌ ² | ✅ | ✅ |
+| `trim` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thumbnail / info / estimate | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Progress / cancel / batch | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Background compression | ⚠️ opt-in ⁵ | ✅ background task | n/a | n/a | n/a |
@@ -487,11 +487,9 @@ have the requested property.
 ¹ Web uses HEVC only where the browser's WebCodecs supports encoding it,
 otherwise H.264. Windows / Linux use `libx265` when available and fall back to
 `libx264`. Read `result.codec`.
-² Only iOS, macOS, Windows and Linux decimate frames. Media3 has no frame-dropping
-effect and the web pipeline re-encodes every decoded frame; on Android/Web,
-`frameRate` only feeds the bitrate maths. Read `result.frameRate`.
-³ Media3 exposes no audio-encoder settings; Android encodes AAC at its own
-default. The value still shapes the `targetSizeMB` budget.
+² Web copies AAC-LC audio unchanged (trimmed with the video, removed by
+`removeAudio`); it cannot re-encode, so `audioBitrateKbps` is ignored and other
+audio codecs are dropped. Read `result.hasAudio`.
 
 ### Image
 
@@ -514,9 +512,8 @@ workaround exists, so do not offer a "keep EXIF" switch on web. Windows / Linux
 use FFmpeg `-map_metadata` (reliable for JPEG).
 
 **Consequence for generated code:** never present an ignored option to the user
-as if it worked. If a UI exposes a frame-rate slider, gate it on platforms that
-actually decimate (`iOS` / `macOS` / `windows` / `linux`), or surface
-`result.frameRate` afterwards.
+as if it worked. If a UI exposes an audio-bitrate control, hide it on Web, or surface
+`result.hasAudio` afterwards.
 
 ---
 
@@ -636,7 +633,7 @@ Future<String?> shrinkVideo(String inputPath) async {
 |---|---|---|
 | Passing an image to `compress()` | Video engine can't open it; runtime failure | Use `compressImage()` |
 | Setting `targetSizeMB` *and* `videoBitrateKbps` | Lower-priority fields silently ignored; intent unclear | Set one |
-| Assuming `frameRate` applies everywhere | Android/Web ignore it; output fps is unchanged | Gate on iOS/macOS/Windows/Linux or read `result.frameRate` |
+| Assuming `audioBitrateKbps` applies on Web | Web copies AAC-LC unchanged | Hide it on Web |
 | Assuming `config.codec` is what shipped | H.265 falls back to H.264 on unsupported hardware | Read `result.codec` |
 | Treating `outputPath` as always a new file | With `skipped: true` it is the **source** — deleting it destroys the user's file | Check `result.skipped` first |
 | Never calling `releaseOutput` on Web | Every output stays in memory for the page's life | Release after use |

@@ -244,29 +244,27 @@ class VideoCompressConfig {
 
   /// Cap the frame rate (e.g. 30). Source fps is kept if lower.
   ///
-  /// iOS and desktop honor this cap. Android ignores
-  /// this; on web every decoded frame is re-encoded, so the cap is ignored. Check
-  /// [VideoCompressResult.frameRate] for what was actually produced.
+  /// Honoured on every platform by dropping frames; it never raises the rate.
+  /// Check [VideoCompressResult.frameRate] for what was actually produced.
   final double? frameRate;
 
   /// Drop the audio track entirely.
   ///
-  /// Android and iOS honour this. **Web always drops audio** in v1, so the
-  /// output has no audio regardless of this flag — see
+  /// Honoured everywhere. On web the source's AAC-LC audio is otherwise copied
+  /// through unchanged; any other audio codec is dropped there — check
   /// [VideoCompressResult.hasAudio].
   final bool removeAudio;
 
   /// Re-encode audio at this bitrate (AAC).
   ///
-  /// Android uses its encoder default; AVFoundation and FFmpeg honor this.
-  /// Media3 exposes no audio-encoder settings on
-  /// `DefaultEncoderFactory`, so Android uses its default bitrate; web has no
-  /// audio at all. It still shapes the [targetSizeMB] budget on native.
+  /// Android (Media3), AVFoundation and FFmpeg re-encode at this rate. Web
+  /// copies the source audio untouched, so it ignores this value (the budget for
+  /// [targetSizeMB] uses the source track's own bitrate there).
   final int? audioBitrateKbps;
 
   /// Encode only this window of the source.
   ///
-  /// Android and iOS honour this. **Web does not apply it yet** (v1), the size budget uses the full source duration.
+  /// Honoured on every platform; the size budget uses the trimmed duration.
   final TrimRange? trim;
 
   final DimensionAlignment alignment;
@@ -423,14 +421,14 @@ class VideoCompressResult {
 
   /// The frame rate actually written, when the platform reports it.
   ///
-  /// [VideoCompressConfig.frameRate] is a request that only iOS can honour, so
-  /// read this rather than assuming the cap applied. Null when unknown.
+  /// Read this to see whether a [VideoCompressConfig.frameRate] cap took
+  /// effect. Null when unknown.
   final double? frameRate;
 
   /// Whether the output carries an audio track.
   ///
   /// Distinguishes "you asked to remove audio" from "this platform dropped it
-  /// anyway" (web v1 always does). Null when the platform doesn't report it.
+  /// anyway" (web drops non-AAC-LC audio). Null when the platform doesn't report it.
   final bool? hasAudio;
 
   /// True when compression was skipped because it would not have reduced size

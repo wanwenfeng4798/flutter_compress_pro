@@ -1,6 +1,6 @@
 name: flutter_compress_pro
 description: "Native video and image compression for Android, iOS, Web and macOS, with a verified FFmpeg backend for Windows and Linux."
-version: 0.2.1
+version: 0.2.2
 homepage: https://github.com/wanwenfeng4798/flutter_compress_pro
 repository: https://github.com/wanwenfeng4798/flutter_compress_pro
 

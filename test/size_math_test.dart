@@ -239,6 +239,22 @@ void main() {
       );
     });
 
+    test('web audio override budgets the source track, not the config', () {
+      const config = VideoCompressConfig(
+        targetSizeMB: 10,
+        audioBitrateKbps: 64,
+      );
+      int bps(int? override) => SizeMath.videoBitrateBps(
+        config: config,
+        durationMs: 60000,
+        sourceBitrateKbps: 5000,
+        targetHeight: 720,
+        audioKbpsOverride: override,
+      );
+      expect(bps(192), lessThan(bps(null)));
+      expect(bps(64), bps(null));
+    });
+
     test('never returns a zero side for a tiny cap', () {
       final (w, h) = SizeMath.targetDimensions(
         1920,
